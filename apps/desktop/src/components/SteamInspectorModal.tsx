@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
+import FocusTrap from 'focus-trap-react';
 import { X } from 'lucide-react';
 import { SteamInspector } from './SteamInspector';
 import { ErrorBoundary } from './ErrorBoundary';
+import './SteamInspector.css';
 
 /// Modal wrapper for the Steam Inspector. Click backdrop or press Esc to
 /// close. The Inspector itself owns its three-column layout, keyboard
@@ -31,20 +33,22 @@ export function SteamInspectorModal({ onClose }: { onClose: () => void }) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="steam-modal-dialog" role="dialog" aria-modal="true" aria-label="Steam Inspector">
-        <div className="steam-modal-head">
-          <div className="steam-modal-title">🎮 Steam Inspector</div>
-          <div className="steam-modal-subtitle">查看你的 Steam 库 · 哪些游戏占地大、好久没玩</div>
-          <button className="steam-modal-close" onClick={onClose} title="关闭 (Esc)">
-            <X size={16} />
-          </button>
+      <FocusTrap focusTrapOptions={{ escapeDeactivates: false, allowOutsideClick: true }}>
+        <div className="steam-modal-dialog" role="dialog" aria-modal="true" aria-label="Steam Inspector">
+          <div className="steam-modal-head">
+            <div className="steam-modal-title">🎮 Steam Inspector</div>
+            <div className="steam-modal-subtitle">查看你的 Steam 库 · 哪些游戏占地大、好久没玩</div>
+            <button className="steam-modal-close" onClick={onClose} title="关闭 (Esc)" aria-label="关闭">
+              <X size={16} />
+            </button>
+          </div>
+          <div className="steam-modal-body">
+            <ErrorBoundary fallbackLabel="Steam Inspector 渲染失败">
+              <SteamInspector />
+            </ErrorBoundary>
+          </div>
         </div>
-        <div className="steam-modal-body">
-          <ErrorBoundary fallbackLabel="Steam Inspector 渲染失败">
-            <SteamInspector />
-          </ErrorBoundary>
-        </div>
-      </div>
+      </FocusTrap>
     </div>
   );
 }

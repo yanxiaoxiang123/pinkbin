@@ -40,11 +40,10 @@ pub struct Scope {
     pub mode: Mode,
     #[serde(default)]
     pub prompt: Option<Prompt>,
-    /// "cache" | "media" | "backup". `None` is treated by the UI as "cache".
     /// Drives Studio's grouping: media → top, cache → merged into one button,
-    /// backup → bottom.
+    /// backup → bottom. `None` is treated by the UI as "cache".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
+    pub category: Option<Category>,
     /// Optional product-version tag (e.g. "3.x" / "4.x" for WeChat). When set,
     /// the UI hides this scope unless the variant is detected in the matched
     /// paths — keeps obsolete-version buckets out of sight without deleting
@@ -62,6 +61,18 @@ pub struct Scope {
     /// minutes; per-directory creates one entry per logical unit.
     #[serde(default)]
     pub recycle_granularity: RecycleGranularity,
+}
+
+/// UI grouping for a scope: cache scopes merge into one button, media are
+/// prominent, backup goes to the bottom. Serialized as lowercase string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    Cache,
+    Media,
+    Backup,
+    #[serde(alias = "envs")]
+    Envs,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -151,9 +162,18 @@ pub fn detect_for(scaffolds: &[Scaffold], path: &Path) -> Option<String> {
     for s in scaffolds {
         for d in &s.detect {
             let pat = norm(&expand_env(d)).to_lowercase();
-            if let Ok(set) = make_globset(&[pat.as_str()]) {
-                if set.is_match(&path_norm) {
-                    return Some(s.id.clone());
+            match make_globset(&[pat.as_str()]) {
+                Ok(set) => {
+                    if set.is_match(&path_norm) {
+                        return Some(s.id.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "scaffold {}: detect pattern {:?} failed to compile: {e}",
+                        s.id,
+                        d
+                    );
                 }
             }
         }
@@ -485,5 +505,39 @@ name_contains = ["xwechat_files", "WeChat Files", "xwechat", "WeChat"]
                 path_str,
             );
         }
+    }
+
+    #[test]
+    fn expand_winpct_basic() {
+        let s = expand_winpct("%USERPROFILE%/Documents");
+        assert_eq!(s, format!(
+            "{}/Documents",
+            std::env::var("USERPROFILE").unwrap_or_default()
+        ));
+    }
+
+    #[test]
+    fn expand_winpct_missing_var_preserves_percent() {
+        let s = expand_winpct("%NONEXISTENT_VAR%/path");
+        assert_eq!(s, "%NONEXISTENT_VAR%/path");
+    }
+
+    #[test]
+    fn expand_winpct_unclosed_keeps_percent() {
+        let s = expand_winpct("C:/Users/%USER");
+        assert_eq!(s, "C:/Users/%USER");
+    }
+
+    #[test]
+    fn expand_winpct_no_variable_copy() {
+        let s = expand_winpct("plain/text");
+        assert_eq!(s, "plain/text");
+    }
+
+    #[test]
+    fn expand_winpct_double_percent_empty_var() {
+        // %% = empty var name "" which fails to resolve, so it stays as-is.
+        let s = expand_winpct("%%/empty");
+        assert_eq!(s, "%%/empty");
     }
 }

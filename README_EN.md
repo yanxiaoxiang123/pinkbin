@@ -164,7 +164,7 @@ Requires **Node 20+ · pnpm 9+ · Rust stable · Tauri prerequisites** (on Windo
   - [SpaceSniffer](http://www.uderzo.it/main_products/space_sniffer/) — treemap visualization pioneer
   - [CleanMyWechat](https://github.com/blackboxo/CleanMyWechat) — the WeChat cleanup script lineage; the messaging requirements doc draws on it
   - [SquirrelDisk](https://github.com/adileo/squirreldisk) — Tauri + Rust reference implementation
-- **Standing on giants' shoulders**: [Tauri](https://tauri.app) · [`d3-hierarchy`](https://github.com/d3/d3-hierarchy) · [`jwalk`](https://github.com/jessegrosjean/jwalk) · [`ntfs`](https://github.com/ColinFinck/ntfs) · [`globset`](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset) · [`trash-rs`](https://github.com/Byron/trash-rs) · [react-markdown](https://github.com/remarkjs/react-markdown)
+- **Standing on giants' shoulders**: [Tauri](https://tauri.app) · [`jwalk`](https://github.com/jessegrosjean/jwalk) · [`ntfs`](https://github.com/ColinFinck/ntfs) · [`globset`](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset) · [`trash-rs`](https://github.com/Byron/trash-rs) · [react-markdown](https://github.com/remarkjs/react-markdown)
 - **Collaboration**: [Claude Code](https://claude.com/claude-code) · [@jtlyu](https://github.com/jtlyu) (perf optimization + WeChat 4.x rewrite + scaffold harness workflow plumbing)
 
 ---

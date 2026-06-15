@@ -1,0 +1,11 @@
+[package]
+name        = "pinkbin-walker"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+jwalk.workspace   = true
+globset.workspace = true
+tracing.workspace = true

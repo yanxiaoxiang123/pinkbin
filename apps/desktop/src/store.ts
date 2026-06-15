@@ -1,12 +1,6 @@
 import { create } from 'zustand';
 import type { Node, Scaffold, AdvisorResponse } from './types';
-
-export interface WalkItem {
-  node: Node;
-  scaffoldId: string | null;
-  advice?: AdvisorResponse;
-  status: 'pending' | 'advising' | 'ready' | 'done' | 'skipped';
-}
+import { getJson, setJson } from './persist';
 
 export interface ChatTurn {
   id: string;
@@ -19,100 +13,116 @@ export interface ChatTurn {
   pending?: boolean;
 }
 
-export interface ChatSession {
-  // the node currently being discussed in the chat panel
-  node: Node | null;
-  scaffoldId: string | null;
-  turns: ChatTurn[];
-  busy: boolean;
+export interface ToastMsg {
+  id: string;
+  text: string;
+  type: 'success' | 'error' | 'info';
 }
 
 interface AppState {
   root: Node | null;
   scaffolds: Scaffold[];
   selectedPath: string | null;
-  walkQueue: WalkItem[];
-  walkIndex: number;
-  walkThresholdGB: number;
-  reclaimedBytes: number;
-  chat: ChatSession;
+  // Flat chat state — no longer nested under `chat: ChatSession`.
+  chatNode: Node | null;
+  chatScaffoldId: string | null;
+  chatTurns: ChatTurn[];
+  chatBusy: boolean;
+  chatAbort: AbortController | null;
   studioRequest: { scaffoldId: string; ts: number } | null;
+  // Cumulative bytes reclaimed this session. Incremented by ChatPanel's
+  // inline recycle and Studio's CleanupModal on success.
+  reclaimedBytes: number;
+  toasts: ToastMsg[];
 
   setRoot: (n: Node | null) => void;
   setScaffolds: (s: Scaffold[]) => void;
   selectPath: (p: string | null) => void;
-  setWalk: (q: WalkItem[]) => void;
-  advanceWalk: () => void;
-  patchWalkItem: (i: number, patch: Partial<WalkItem>) => void;
-  setThreshold: (gb: number) => void;
   addReclaimed: (n: number) => void;
+  pushToast: (t: Omit<ToastMsg, 'id'>) => void;
+  popToast: (id: string) => void;
 
   focusChatOn: (node: Node, scaffoldId: string | null) => void;
   pushChatTurn: (t: ChatTurn) => void;
   patchChatTurn: (id: string, patch: Partial<ChatTurn>) => void;
   setChatBusy: (b: boolean) => void;
   resetChat: () => void;
+  // Aborts any in-flight chat request, returns the new request's signal.
+  // Pair with endChatRequest(signal) in the caller's finally — endChatRequest
+  // only clears the controller if it's still the one this caller owns, so a
+  // stale finally from an aborted request can't wipe out the next one's
+  // controller.
+  beginChatRequest: () => AbortSignal;
+  endChatRequest: (signal: AbortSignal) => void;
   requestStudio: (scaffoldId: string) => void;
   consumeStudio: () => void;
+  // Mirrored from useScan's local `scanning` state via useEffect, so
+  // Studio can grey itself out while a scan is in flight.
+  scanInProgress: boolean;
+  setScanInProgress: (b: boolean) => void;
+  // Persisted (array, not Set — JSON-friendly). Studio cards whose id is
+  // in this set render expanded. Survives app restarts.
+  studioExpanded: string[];
+  toggleStudioExpanded: (scaffoldId: string) => void;
 }
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
   root: null,
   scaffolds: [],
   selectedPath: null,
-  walkQueue: [],
-  walkIndex: 0,
-  walkThresholdGB: 1,
-  reclaimedBytes: 0,
-  chat: { node: null, scaffoldId: null, turns: [], busy: false },
+  chatNode: null,
+  chatScaffoldId: null,
+  chatTurns: [],
+  chatBusy: false,
+  chatAbort: null,
   studioRequest: null,
+  reclaimedBytes: 0,
+  toasts: [],
+  scanInProgress: false,
+  studioExpanded: getJson<string[]>('studioExpanded', []),
 
   setRoot: (root) => set({ root }),
   setScaffolds: (scaffolds) => set({ scaffolds }),
   selectPath: (selectedPath) => set({ selectedPath }),
-  setWalk: (walkQueue) => set({ walkQueue, walkIndex: 0 }),
-  advanceWalk: () => set((s) => ({ walkIndex: Math.min(s.walkIndex + 1, s.walkQueue.length) })),
-  patchWalkItem: (i, patch) =>
-    set((s) => {
-      const q = s.walkQueue.slice();
-      q[i] = { ...q[i], ...patch };
-      return { walkQueue: q };
-    }),
-  setThreshold: (walkThresholdGB) => set({ walkThresholdGB }),
   addReclaimed: (n) => set((s) => ({ reclaimedBytes: s.reclaimedBytes + n })),
+  pushToast: (t) => set((s) => ({ toasts: [...s.toasts, { ...t, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6) }] })),
+  popToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
   focusChatOn: (node, scaffoldId) =>
     // Keep prior turns — the user wants ONE running conversation. We just
     // update the "focused" node/scaffold so any inline scaffold chips line
     // up with whatever was most recently dropped.
-    set((s) => ({ chat: { ...s.chat, node, scaffoldId } })),
-  pushChatTurn: (t) => set((s) => ({ chat: { ...s.chat, turns: [...s.chat.turns, t] } })),
+    set({ chatNode: node, chatScaffoldId: scaffoldId }),
+  pushChatTurn: (t) => set((s) => ({ chatTurns: [...s.chatTurns, t] })),
   patchChatTurn: (id, patch) =>
     set((s) => ({
-      chat: {
-        ...s.chat,
-        turns: s.chat.turns.map((t) => (t.id === id ? { ...t, ...patch } : t)),
-      },
+      chatTurns: s.chatTurns.map((t) => (t.id === id ? { ...t, ...patch } : t)),
     })),
-  setChatBusy: (b) => set((s) => ({ chat: { ...s.chat, busy: b } })),
-  resetChat: () => set(() => ({ chat: { node: null, scaffoldId: null, turns: [], busy: false } })),
+  setChatBusy: (chatBusy) => set({ chatBusy }),
+  resetChat: () => {
+    get().chatAbort?.abort();
+    set({ chatNode: null, chatScaffoldId: null, chatTurns: [], chatBusy: false, chatAbort: null });
+  },
+  beginChatRequest: () => {
+    const prev = get().chatAbort;
+    if (prev) prev.abort();
+    const ac = new AbortController();
+    set({ chatAbort: ac });
+    return ac.signal;
+  },
+  endChatRequest: (signal) => {
+    const ac = get().chatAbort;
+    if (ac && ac.signal === signal) set({ chatAbort: null });
+  },
   requestStudio: (scaffoldId) => set({ studioRequest: { scaffoldId, ts: Date.now() } }),
   consumeStudio: () => set({ studioRequest: null }),
+  toggleStudioExpanded: (scaffoldId) => {
+    const cur = get().studioExpanded;
+    const next = cur.includes(scaffoldId)
+      ? cur.filter((x) => x !== scaffoldId)
+      : [...cur, scaffoldId];
+    setJson('studioExpanded', next);
+    set({ studioExpanded: next });
+  },
+  setScanInProgress: (scanInProgress) => set({ scanInProgress }),
 }));
-
-export function buildWalkQueue(root: Node, thresholdBytes: number): { node: Node; scaffoldId: string | null }[] {
-  const out: { node: Node; scaffoldId: string | null }[] = [];
-  const visit = (n: Node, depth: number) => {
-    if (!n.is_dir) return;
-    if (n.size >= thresholdBytes && depth > 0) {
-      out.push({ node: n, scaffoldId: n.scaffold_id ?? null });
-      return;
-    }
-    if (depth < 4) {
-      for (const c of n.children) visit(c, depth + 1);
-    }
-  };
-  visit(root, 0);
-  out.sort((a, b) => b.node.size - a.node.size);
-  return out;
-}

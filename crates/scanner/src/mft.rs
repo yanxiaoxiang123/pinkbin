@@ -72,6 +72,9 @@ where
 
     let record_size = ntfs.file_record_size() as u64;
     let total_size = mft_data_value.len();
+    if record_size == 0 {
+        anyhow::bail!("MFT record size is 0 — corrupted NTFS boot sector");
+    }
     let total_records = (total_size / record_size) as u64;
     // Release the borrow chain on `reader` (mft_data_value → mft_data_attribute →
     // mft_file) before we re-borrow `reader` below for the per-record walk.
@@ -253,10 +256,12 @@ fn find_frn_for_path(target: &Path, root_frn: u64, entries: &HashMap<u64, Entry>
     for c in comps {
         let e = entries.get(&current)?;
         let next = e.children.iter().copied().find(|frn| {
-            entries
-                .get(frn)
-                .map(|x| x.name.eq_ignore_ascii_case(&c))
-                .unwrap_or(false)
+            entries.get(frn).map(|x| {
+                // NTFS is case-insensitive; ASCII-path fast path first, then
+                // Unicode case folding for non-ASCII names (e.g. Straße → STRASSE).
+                x.name.eq_ignore_ascii_case(&c)
+                    || x.name.to_lowercase() == c.to_lowercase()
+            }).unwrap_or(false)
         })?;
         current = next;
     }
@@ -326,6 +331,15 @@ fn build_node(
             let cnode = build_node(*cfrn, &cpath, entries, sizes, depth + 1);
             children_nodes.push(cnode);
         }
+
+        // Merge child directory extensions so top_extensions is consistent with
+        // walkdir mode (accumulated from all descendants).
+        for child in &children_nodes {
+            for ext in &child.top_extensions {
+                *ext_bytes.entry(ext.ext.clone()).or_insert(0) += ext.bytes;
+                *ext_count.entry(ext.ext.clone()).or_insert(0) += ext.count;
+            }
+        }
     }
 
     let mut top_extensions: Vec<ExtShare> = ext_bytes
@@ -339,6 +353,22 @@ fn build_node(
     top_extensions.sort_by_key(|e| std::cmp::Reverse(e.bytes));
     top_extensions.truncate(8);
 
+    // Populate sample_paths from immediate children + child directories' paths.
+    // Mirrors walkdir's SAMPLE_DEPTH logic: each recursion level naturally
+    // extends reach by one hop without explicit depth counting.
+    let mut sample_paths: Vec<String> = Vec::new();
+    for child in &children_nodes {
+        if sample_paths.len() >= crate::SAMPLE_LIMIT_PER_DIR {
+            break;
+        }
+        if child.is_dir {
+            sample_paths.extend(child.sample_paths.iter().cloned());
+        } else {
+            sample_paths.push(child.path.clone());
+        }
+    }
+    sample_paths.truncate(crate::SAMPLE_LIMIT_PER_DIR);
+
     Node {
         name,
         path: path.to_string_lossy().to_string(),
@@ -348,5 +378,7 @@ fn build_node(
         children: children_nodes,
         scaffold_id: None,
         top_extensions,
+        sample_paths,
+        tagged_descendant: false,
     }
 }

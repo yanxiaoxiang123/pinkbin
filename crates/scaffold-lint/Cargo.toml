@@ -9,7 +9,12 @@ repository.workspace  = true
 name = "pinkbin-scaffold-lint"
 path = "src/main.rs"
 
+[lib]
+name = "pinkbin_scaffold_lint"
+path = "src/lib.rs"
+
 [dependencies]
 pinkbin-scaffold = { path = "../scaffold" }
 toml.workspace    = true
 anyhow.workspace  = true
+globset.workspace = true

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import clsx from 'clsx';
 import { ExternalLink } from 'lucide-react';
 
 export interface ContextMenuItem {
@@ -58,7 +59,7 @@ export function ContextMenu({ state, onClose }: Props) {
       {state.items.map((it, i) => (
         <button
           key={i}
-          className={'ctxmenu-item' + (it.danger ? ' danger' : '')}
+          className={clsx('ctxmenu-item', it.danger && 'danger')}
           onClick={() => { it.onClick(); onClose(); }}
         >
           <span className="ctxmenu-icon">{it.icon ?? <ExternalLink size={12} />}</span>

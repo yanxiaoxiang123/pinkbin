@@ -5,30 +5,13 @@
 //! Windows for sub-3s C: drive scans.
 
 use jwalk::WalkDir as JWalk;
+use pinkbin_walker::is_pruned_system_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-
-/// 系统级"垃圾/卷元数据"目录名（lowercase）。scanner 扫盘时整树跳过。
-/// 不只是性能：让回收站进 Node tree 会被前端 fallback 的 name_contains
-/// 当成"伪 app 数据 root"——用户曾把 xwechat_files 删进回收站后，
-/// `C:\$Recycle.Bin\<SID>\$R*\xwechat_files` 会被识别为活的 WeChat 数据
-/// 触发误删。System Volume Information 同时还能避开 VSS 权限拒绝噪音。
-const PRUNED_SYSTEM_DIRS: &[&str] = &[
-    "$recycle.bin",
-    "system volume information",
-    ".trash",
-    ".trashes",
-];
-
-fn is_pruned_system_dir(name: &std::ffi::OsStr) -> bool {
-    let Some(s) = name.to_str() else { return false };
-    let lower = s.to_ascii_lowercase();
-    PRUNED_SYSTEM_DIRS.iter().any(|p| *p == lower)
-}
 
 #[cfg(windows)]
 mod mft;
@@ -45,7 +28,22 @@ pub struct Node {
     pub scaffold_id: Option<String>,
     #[serde(default)]
     pub top_extensions: Vec<ExtShare>,
+    /// File paths within depth 3 of this directory, capped at
+    /// `SAMPLE_LIMIT_PER_DIR`. Populated during the scan so the AI advisor
+    /// can see "what's actually in here" without a separate inspect IPC
+    /// round-trip per matched location.
+    #[serde(default)]
+    pub sample_paths: Vec<String>,
+    /// Pre-computed during tag_and_truncate post-order — indicates whether
+    /// this node or any descendant has a scaffold_id. Avoids O(N²) subtree
+    /// traversal during truncation partitioning. Not serialized; only used
+    /// in-memory on the Rust side.
+    #[serde(skip, default)]
+    pub tagged_descendant: bool,
 }
+
+pub const SAMPLE_LIMIT_PER_DIR: usize = 8;
+const SAMPLE_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtShare {
@@ -61,6 +59,12 @@ struct DirAcc {
     ext_bytes: HashMap<String, u64>,
     ext_count: HashMap<String, u64>,
     files: Vec<(String, u64)>, // (file name, size) — only kept on the immediate parent
+    /// File paths (full) within SAMPLE_DEPTH of this directory, capped at
+    /// SAMPLE_LIMIT_PER_DIR. Filled during the walk; consumed by build_tree.
+    sample_paths: Vec<String>,
+    /// Subdirectory names recorded by jwalk's process_read_dir callback,
+    /// used by build_tree instead of a second filesystem read_dir pass.
+    subdirs: Vec<String>,
 }
 
 pub struct ScanOptions {
@@ -200,6 +204,12 @@ where
     let bytes_seen = Arc::new(AtomicU64::new(0));
     let last_emit = Arc::new(AtomicU64::new(0));
 
+    // Pre-allocate accumulators before walker construction so process_read_dir
+    // can record subdirectory names into subdirs_map for build_tree.
+    let mut accs: HashMap<PathBuf, DirAcc> = HashMap::new();
+    let subdirs_map: Arc<Mutex<HashMap<PathBuf, Vec<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     // Phase 1: parallel walk, collect (path, size) pairs for every file.
     let mut walker = JWalk::new(&root)
         .skip_hidden(false)
@@ -207,20 +217,39 @@ where
         .parallelism(jwalk::Parallelism::RayonDefaultPool {
             busy_timeout: std::time::Duration::from_secs(5),
         })
-        .process_read_dir(|_, _, _, children| {
-            children.retain(|res| {
-                let Ok(entry) = res else { return true };
-                if !entry.file_type.is_dir() {
-                    return true;
+        .process_read_dir({
+            let subdirs_map = Arc::clone(&subdirs_map);
+            move |_, parent, _, children| {
+                // Record subdirectory names so build_tree can avoid a second
+                // serial read_dir pass through the whole tree.
+                let subdirs: Vec<String> = children
+                    .iter()
+                    .filter_map(|res| {
+                        let Ok(entry) = res else { return None };
+                        if entry.file_type.is_dir() && !is_pruned_system_dir(&entry.file_name) {
+                            Some(entry.file_name.to_string_lossy().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !subdirs.is_empty() {
+                    subdirs_map.lock().unwrap().insert(parent.to_path_buf(), subdirs);
                 }
-                !is_pruned_system_dir(&entry.file_name)
-            });
+
+                children.retain(|res| {
+                    let Ok(entry) = res else { return true };
+                    if !entry.file_type.is_dir() {
+                        return true;
+                    }
+                    !is_pruned_system_dir(&entry.file_name)
+                });
+            }
         });
     if let Some(d) = opts.max_depth {
         walker = walker.max_depth(d);
     }
 
-    let mut accs: HashMap<PathBuf, DirAcc> = HashMap::new();
     let walk_t0 = Instant::now();
 
     for entry in walker.into_iter().flatten() {
@@ -228,7 +257,13 @@ where
             continue;
         }
         let path = entry.path();
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let size = match entry.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => {
+                tracing::warn!("scan: metadata error for {:?}: {e}", entry.path());
+                0
+            }
+        };
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
@@ -242,6 +277,34 @@ where
         if let Some(parent) = path.parent() {
             let acc = accs.entry(parent.to_path_buf()).or_default();
             acc.files.push((file_name, size));
+            // Bound memory during walk (Issue 10): keep files vector at 2× keep_files_per_dir.
+            if let Some(limit) = opts.keep_files_per_dir {
+                if acc.files.len() > limit * 2 {
+                    acc.files.sort_by_key(|f| std::cmp::Reverse(f.1));
+                    acc.files.truncate(limit);
+                }
+            }
+        }
+        // Populate sample_paths for up to SAMPLE_DEPTH ancestors, capped at
+        // SAMPLE_LIMIT_PER_DIR per dir. Cost is O(SAMPLE_DEPTH) HashMap lookups
+        // + Vec pushes per file; with a per-dir cap the total memory is bounded
+        // by SAMPLE_LIMIT_PER_DIR × number of nodes that actually contain files.
+        let path_str = path.to_string_lossy().to_string();
+        let mut cur = path.parent();
+        let mut hops = 0;
+        while let Some(dir) = cur {
+            if dir == root || !dir.starts_with(&root) {
+                break;
+            }
+            let acc = accs.entry(dir.to_path_buf()).or_default();
+            if acc.sample_paths.len() < SAMPLE_LIMIT_PER_DIR {
+                acc.sample_paths.push(path_str.clone());
+            }
+            cur = dir.parent();
+            hops += 1;
+            if hops >= SAMPLE_DEPTH {
+                break;
+            }
         }
         let mut cur = path.parent();
         while let Some(dir) = cur {
@@ -268,6 +331,16 @@ where
             });
         }
     }
+
+    // Merge subdirectory lists recorded by process_read_dir into accs.
+    // Use the lock directly (not try_unwrap) since the Arc may still have
+    // references if the jwalk iterator hasn't dropped the closure yet.
+    let subdirs = std::mem::take(&mut *subdirs_map.lock().unwrap());
+    for (path, dirs) in subdirs {
+        accs.entry(path).or_default().subdirs = dirs;
+    }
+    // Drop the Arc so its memory is freed.
+    drop(subdirs_map);
 
     stats.walk_ms = walk_t0.elapsed().as_millis() as u64;
     stats.files_seen = files_seen.load(Ordering::Relaxed);
@@ -302,6 +375,35 @@ where
 }
 
 fn build_tree(dir: &Path, accs: &HashMap<PathBuf, DirAcc>, keep_files: Option<usize>) -> Node {
+    build_tree_depth(dir, accs, keep_files, 0)
+}
+
+fn build_tree_depth(
+    dir: &Path,
+    accs: &HashMap<PathBuf, DirAcc>,
+    keep_files: Option<usize>,
+    depth: usize,
+) -> Node {
+    // Guard against stack overflow on deeply nested directories.
+    if depth > 128 {
+        tracing::warn!("build_tree: max depth exceeded at {:?}", dir);
+        let name = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.to_string_lossy().to_string());
+        return Node {
+            name,
+            path: dir.to_string_lossy().to_string(),
+            is_dir: true,
+            size: 0,
+            file_count: 0,
+            children: Vec::new(),
+            scaffold_id: None,
+            top_extensions: Vec::new(),
+            sample_paths: Vec::new(),
+            tagged_descendant: false,
+        };
+    }
     let acc = accs.get(dir);
     let size = acc.map(|a| a.size).unwrap_or(0);
     let file_count = acc.map(|a| a.file_count).unwrap_or(0);
@@ -321,6 +423,7 @@ fn build_tree(dir: &Path, accs: &HashMap<PathBuf, DirAcc>, keep_files: Option<us
             v
         })
         .unwrap_or_default();
+    let sample_paths = acc.map(|a| a.sample_paths.clone()).unwrap_or_default();
 
     let name = dir
         .file_name()
@@ -329,17 +432,26 @@ fn build_tree(dir: &Path, accs: &HashMap<PathBuf, DirAcc>, keep_files: Option<us
 
     let mut children: Vec<Node> = Vec::new();
 
-    // Subdirectories — recurse. build_tree 用 std::fs::read_dir 重新枚举子目录
-    // （不复用 jwalk 的输出），所以 prune 必须在这里再做一次——否则即便 jwalk
-    // 跳过了 $Recycle.Bin，build_tree 仍会把它列为 dir 节点放进 Node tree，
-    // 前端 fallbackByNameContains 仍会把回收站里的伪 root 当成 app 数据。
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if is_pruned_system_dir(&entry.file_name()) {
-                    continue;
+    // Cap breadth like MFT's build_node to keep the JSON tree bounded.
+    let breadth_cap = if depth < 2 { 200 } else if depth < 4 { 80 } else { 25 };
+
+    // Subdirectories — use acc.subdirs recorded by jwalk's process_read_dir,
+    // avoiding a second serial read_dir pass through the whole tree.
+    // System dirs have already been pruned by process_read_dir.
+    if let Some(a) = acc {
+        for sub_name in a.subdirs.iter().take(breadth_cap) {
+            children.push(build_tree_depth(&dir.join(sub_name), accs, keep_files, depth + 1));
+        }
+    } else {
+        // Fallback for roots without a DirAcc entry (defensive).
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten().take(breadth_cap) {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    if is_pruned_system_dir(&entry.file_name()) {
+                        continue;
+                    }
+                    children.push(build_tree_depth(&entry.path(), accs, keep_files, depth + 1));
                 }
-                children.push(build_tree(&entry.path(), accs, keep_files));
             }
         }
     }
@@ -360,6 +472,8 @@ fn build_tree(dir: &Path, accs: &HashMap<PathBuf, DirAcc>, keep_files: Option<us
                 children: Vec::new(),
                 scaffold_id: None,
                 top_extensions: Vec::new(),
+                sample_paths: Vec::new(),
+                tagged_descendant: false,
             });
         }
     }
@@ -375,6 +489,8 @@ fn build_tree(dir: &Path, accs: &HashMap<PathBuf, DirAcc>, keep_files: Option<us
         children,
         scaffold_id: None,
         top_extensions,
+        sample_paths,
+        tagged_descendant: false,
     }
 }
 
@@ -394,10 +510,12 @@ fn drive_letter_of(p: &Path) -> Option<char> {
 #[cfg(windows)]
 fn is_drive_root(p: &Path) -> bool {
     let s = p.to_string_lossy();
-    matches!(s.as_ref(), "C:" | "D:" | "E:" | "F:" | "G:" | "H:")
-        || (s.len() == 3
-            && s.as_bytes()[1] == b':'
-            && (s.as_bytes()[2] == b'\\' || s.as_bytes()[2] == b'/'))
+    let bytes = s.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2
+            || (bytes.len() == 3 && (bytes[2] == b'\\' || bytes[2] == b'/')))
 }
 
 /// Pull up to `n` sample paths from a directory, ordered shallowest-first.

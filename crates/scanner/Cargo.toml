@@ -9,11 +9,9 @@ repository.workspace  = true
 serde.workspace     = true
 walkdir.workspace   = true
 jwalk.workspace     = true
-rayon.workspace     = true
 anyhow.workspace    = true
-thiserror.workspace = true
 tracing.workspace   = true
+pinkbin-walker      = { path = "../walker" }
 
 [target.'cfg(windows)'.dependencies]
-ntfs.workspace        = true
-windows-sys.workspace = true
+ntfs.workspace = true

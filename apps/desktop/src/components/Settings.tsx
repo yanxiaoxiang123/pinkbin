@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react';
+import FocusTrap from 'focus-trap-react';
 import { X, CheckCircle2, Info, Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { isTauri } from '../env';
-import { loadSettings, saveSettings, clearSettings, type Provider } from '../advisorClient';
+import {
+  loadSettings,
+  saveSettings,
+  clearSettings,
+  ADVISOR_KEY_ACCOUNT,
+  invalidateApiKey,
+  type Provider,
+} from '../advisorClient';
 
 type Props = { onClose: () => void };
 
@@ -35,10 +43,16 @@ export function Settings({ onClose }: Props) {
     const existing = loadSettings();
     if (existing) {
       setModel(existing.model);
-      setApiKey(existing.apiKey);
       setBaseUrl(existing.baseUrl);
       setSaved(true);
     }
+    // The key is not in localStorage — it lives in the OS credential
+    // manager. We pull it on mount so the input field is pre-filled
+    // (so the user can verify or edit), but never write it back to disk
+    // in plaintext.
+    api.loadSecret(ADVISOR_KEY_ACCOUNT)
+      .then((k) => { if (k) setApiKey(k); })
+      .catch(() => { /* empty slot or keychain unavailable — leave field blank */ });
   }, []);
 
   const provider = detectProvider(baseUrl);
@@ -50,29 +64,50 @@ export function Settings({ onClose }: Props) {
     if (!model.trim())   { setErr('请填 Model 名'); return; }
     if (needsKey && !apiKey.trim()) { setErr('请填 API Key'); return; }
     try {
-      saveSettings({ provider, model, apiKey, baseUrl });
-      if (isTauri) {
-        await api.setAdvisor(provider, model, needsKey ? apiKey : undefined, baseUrl);
+      // Non-secret config (provider/model/baseUrl) goes to localStorage so
+      // it survives reload without an OS keychain round-trip on startup.
+      // The key itself goes to the credential manager — never to
+      // localStorage, which is a plaintext file on disk.
+      saveSettings({ provider, model, baseUrl });
+      if (needsKey) {
+        await api.storeSecret(ADVISOR_KEY_ACCOUNT, apiKey);
+      } else {
+        await api.deleteSecret(ADVISOR_KEY_ACCOUNT);
       }
-      setMsg('已保存 · key 只存在你本机 localStorage');
+      invalidateApiKey(); // re-read on next AI call
+      if (isTauri) {
+        await api.setAdvisor(provider, model, baseUrl);
+      }
+      setMsg('已保存 · key 只存在你本机系统钥匙串 (Credential Manager / Keychain / libsecret)');
       setSaved(true);
     } catch (e) {
       setErr(String(e));
     }
   };
 
-  const wipe = () => {
+  const wipe = async () => {
+    try {
+      await api.deleteSecret(ADVISOR_KEY_ACCOUNT);
+    } catch { /* idempotent */ }
+    invalidateApiKey();
     clearSettings();
     setApiKey('');
     setBaseUrl('');
     setModel('');
     setSaved(false);
-    setMsg('已清除本地保存的配置');
+    setMsg('已清除本地保存的配置和钥匙串里的 key');
   };
 
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <FocusTrap focusTrapOptions={{ escapeDeactivates: false, allowOutsideClick: true }}>
+        <div
+          className="modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="AI 顾问设置"
+          onClick={(e) => e.stopPropagation()}
+        >
         <div className="modal-head">
           <div>AI 顾问设置 {saved && <CheckCircle2 size={16} style={{ verticalAlign: 'middle', marginLeft: 6, color: 'var(--pink-deep)' }} />}</div>
           <button className="ghost icon" onClick={onClose}><X size={16} /></button>
@@ -130,13 +165,14 @@ export function Settings({ onClose }: Props) {
         <div className="modal-actions">
           {saved && <button className="ghost" onClick={wipe}>清除</button>}
           <button className="primary" onClick={save}>保存</button>
-          <button className="ghost" onClick={onClose}>关闭</button>
+          <button className="ghost" onClick={onClose} aria-label="关闭">关闭</button>
         </div>
 
         <p className="muted small" style={{ marginTop: 4 }}>
           Pinkbin 只把目录元数据发给 AI（路径、大小、文件数、扩展名分布、抽样路径），<strong>不会</strong>读取或上传文件内容。
         </p>
-      </div>
+        </div>
+      </FocusTrap>
     </div>
   );
 }

@@ -1,5 +1,5 @@
-import type { Node, Scaffold, AdvisorRequest, AdvisorResponse, UndoEntry, Plan, SteamInventory, WorkshopItem } from './types';
-import { callAdvisor, isConfigured, loadSettings } from './advisorClient';
+import type { Node, Scaffold, AdvisorRequest, AdvisorResponse, UndoEntry, SteamInventory, WorkshopItem } from './types';
+import { callAdvisor, isConfiguredAsync, loadSettings } from './advisorClient';
 
 const GB = 1024 ** 3;
 
@@ -281,53 +281,116 @@ export async function inspect(path: string, n: number): Promise<string[]> {
   return Array.from({ length: Math.min(n, 12) }, (_, i) => `${path}\\sample_${i + 1}.bin`);
 }
 
-export async function advise(req: AdvisorRequest): Promise<AdvisorResponse> {
-  // Try the real API first if the user has configured one in Settings.
-  const settings = loadSettings();
-  if (isConfigured(settings)) {
-    try {
-      return await callAdvisor(settings, req);
-    } catch (e) {
-      console.warn('[pinkbin] real advisor failed, falling back to canned response:', e);
-      // fall through to canned mock
-    }
+/// Thrown by `advise` when the real AI call failed (network / CORS /
+/// rate-limit / SSL / wrong model / wrong baseUrl) AND the caller
+/// asked us to refuse a silent canned fallback. Distinct class so the
+/// UI can show a dedicated Toast / ErrorBoundary message instead of
+/// pretending the canned response is a real verdict.
+///
+/// **Do not catch this and fall back to canned advice.** For an app
+/// that recommends whether to delete user files, a silent fallback to
+/// a hard-coded "keep" answer is a worse failure than no answer at all
+/// — the user has no way to tell that the network request failed and
+/// would trust the canned "safe_to_delete: false" verdict.
+export class AdvisorCallError extends Error {
+  override readonly name = 'AdvisorCallError';
+  constructor(
+    message: string,
+    readonly cause: unknown,
+  ) {
+    super(message);
   }
-  return cannedAdvice(req);
+}
+
+export async function advise(req: AdvisorRequest): Promise<AdvisorResponse> {
+  // If the user hasn't configured a key, the only thing we can hand
+  // back is canned advice — and the UI must treat it as such. Mark the
+  // response with `is_fallback: true` so callers can render a banner
+  // and refuse to act on `action` / `safe_to_delete`.
+  const settings = loadSettings();
+  if (!settings || !(await isConfiguredAsync(settings))) {
+    return cannedAdvice(req);
+  }
+  // Key is configured. If the real call fails — wrong baseUrl, wrong
+  // model name, CORS preflight rejected, rate limit, TLS handshake,
+  // proxy hiccup, JSON parse error — we **throw** rather than silently
+  // return canned advice. The UI is responsible for surfacing the
+  // error; a hidden fallback is exactly the bug this guard closes.
+  try {
+    return await callAdvisor(settings, req);
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new AdvisorCallError(
+      `AI 调用失败：${detail}（已放弃回退到演示数据 — 网络/CORS/限流/SSL/baseUrl/model 都有可能。结论不可信，请去设置里检查 API key / baseUrl / model 名，或者切到 Tauri 桌面模式绕过浏览器 CORS。）`,
+      e,
+    );
+  }
 }
 
 async function cannedAdvice(req: AdvisorRequest): Promise<AdvisorResponse> {
   await wait(900);
-  const p = req.path.toLowerCase();
-  if (p.includes('windows\\winsxs')) {
-    return { what: 'Windows 组件存储（WinSxS）', category: 'system', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '系统更新需要的硬链接库；不要直接删，用 dism 清理。', needs_inspection: false };
-  }
-  if (p.includes('windows')) {
-    return { what: 'Windows 系统目录', category: 'system', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '系统核心，绝对不要删。', needs_inspection: false };
-  }
-  if (p.includes('program files')) {
-    return { what: '已安装应用程序', category: 'app_cache', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '应该用控制面板卸载，不要直接删整个文件夹。', needs_inspection: false };
-  }
-  if (p.includes('recovery')) {
-    return { what: 'Windows 恢复分区数据', category: 'system', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '出问题时用来重置系统的，留着。', needs_inspection: false };
-  }
-  if (p.includes('eastmoney')) {
-    return { what: '东方财富 Choice 数据', category: 'app_cache', safe_to_delete: true, risk: 'medium', action: 'recycle', reasoning: '看起来是金融客户端的本地数据库；如果你不再用 Choice 终端可清，否则保留。', needs_inspection: true };
-  }
-  if (p.includes('locallow')) {
-    return { what: '低权限 App 数据', category: 'app_cache', safe_to_delete: true, risk: 'low', action: 'recycle', reasoning: '通常是 Edge/IE 沙盒数据，可清。', needs_inspection: false };
-  }
-  return { what: '（演示数据）未配置 AI Key 时使用预设回答', category: 'unknown', safe_to_delete: false, risk: 'medium', action: 'keep', reasoning: '在右上角设置里填 OpenAI / Anthropic / Ollama 的 key 后，就能拿到真正的 AI 判断。', needs_inspection: true };
+  const base = (): AdvisorResponse => {
+    const p = req.path.toLowerCase();
+    if (p.includes('windows\\winsxs')) {
+      return { what: 'Windows 组件存储（WinSxS）', category: 'system', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '系统更新需要的硬链接库；不要直接删，用 dism 清理。', needs_inspection: false };
+    }
+    if (p.includes('windows')) {
+      return { what: 'Windows 系统目录', category: 'system', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '系统核心，绝对不要删。', needs_inspection: false };
+    }
+    if (p.includes('program files')) {
+      return { what: '已安装应用程序', category: 'app_cache', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '应该用控制面板卸载，不要直接删整个文件夹。', needs_inspection: false };
+    }
+    if (p.includes('recovery')) {
+      return { what: 'Windows 恢复分区数据', category: 'system', safe_to_delete: false, risk: 'high', action: 'keep', reasoning: '出问题时用来重置系统的，留着。', needs_inspection: false };
+    }
+    if (p.includes('eastmoney')) {
+      return { what: '东方财富 Choice 数据', category: 'app_cache', safe_to_delete: true, risk: 'medium', action: 'recycle', reasoning: '看起来是金融客户端的本地数据库；如果你不再用 Choice 终端可清，否则保留。', needs_inspection: true };
+    }
+    if (p.includes('locallow')) {
+      return { what: '低权限 App 数据', category: 'app_cache', safe_to_delete: true, risk: 'low', action: 'recycle', reasoning: '通常是 Edge/IE 沙盒数据，可清。', needs_inspection: false };
+    }
+    return { what: '（演示数据）未配置 AI Key 时使用预设回答', category: 'unknown', safe_to_delete: false, risk: 'medium', action: 'keep', reasoning: '在右上角设置里填 OpenAI / Anthropic / Ollama 的 key 后，就能拿到真正的 AI 判断。', needs_inspection: true };
+  };
+  // Every canned response is a fallback — the UI must display a
+  // warning and refuse to act on `action` / `safe_to_delete`.
+  return { ...base(), is_fallback: true };
 }
 
-export async function execute(plan: Plan, _dryRun: boolean): Promise<UndoEntry[]> {
+export async function execute(
+  _scaffoldId: string,
+  _scopeId: string,
+  paths: string[],
+  reason: string,
+  _dryRun: boolean,
+): Promise<UndoEntry[]> {
   await wait(400);
-  return plan.paths.map((src) => ({
+  return paths.map((src) => ({
     timestamp: new Date().toISOString(),
-    action: plan.action,
+    action: 'recycle' as const,
     source: src,
-    destination: plan.action === 'quarantine' ? `${src} → quarantine` : null,
-    reason: plan.reason,
+    destination: null,
+    reason,
   }));
+}
+
+export async function findScopeForPath(
+  path: string,
+): Promise<{ scaffold_id: string; scope_id: string; mode: 'recycle' | 'quarantine' | 'delete' }[]> {
+  await wait(50);
+  const p = path.toLowerCase().replace(/\\/g, '/');
+  const matches: { scaffold_id: string; scope_id: string; mode: 'recycle' | 'quarantine' | 'delete' }[] = [];
+  for (const s of SCAFFOLDS) {
+    for (const sc of s.scopes) {
+      const frag = sc.glob
+        .replace(/\*\*?\//g, '')
+        .replace(/\\/g, '/')
+        .toLowerCase();
+      if (p.includes(frag)) {
+        matches.push({ scaffold_id: s.id, scope_id: sc.id, mode: sc.mode });
+      }
+    }
+  }
+  return matches;
 }
 
 function wait(ms: number) { return new Promise<void>((r) => setTimeout(r, ms)); }

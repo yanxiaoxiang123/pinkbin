@@ -137,7 +137,6 @@ Pinkbin 发给 AI 的就是这种东西：
 | 跨平台目录遍历 | [`jwalk`](https://github.com/jessegrosjean/jwalk) |
 | 路径模式匹配 | [`globset`](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)（来自 ripgrep） |
 | 走系统回收站 | [`trash-rs`](https://github.com/Byron/trash-rs) |
-| Treemap 布局 | [`d3-hierarchy`](https://github.com/d3/d3-hierarchy) |
 | Markdown 渲染 | [`react-markdown`](https://github.com/remarkjs/react-markdown) |
 
 灵感来源：

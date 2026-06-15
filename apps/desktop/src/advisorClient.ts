@@ -1,59 +1,440 @@
-// Browser-side AI advisor client — talks to OpenAI / Anthropic / Ollama directly
-// from the browser, so the preview mode can give real answers.
+// Browser-side AI advisor client — talks to OpenAI / Anthropic / Gemini / Ollama
+// directly from the browser, so the preview mode can give real answers.
 //
-// Settings persist to localStorage under "pinkbin.advisor".
+// Settings persist through the shared localStorage facade; see persist.ts.
+//
+// One provider table, one HTTP path, one SSE parser. The four providers used
+// to be inlined twice (once for JSON-mode advisor, once for chat) — this
+// version folds them into a single runCompletion() with optional streaming
+// and AbortSignal support.
 
 import type { AdvisorRequest, AdvisorResponse } from './types';
+import { getJson, setJson, removeKey } from './persist';
+import { SYSTEM_PROMPT, CHAT_SYSTEM, OVERVIEW_SYSTEM } from './prompts';
+import { redactAdvisorRequest, redactPath, redactSample, redactSamples } from './privacy';
 
 export type Provider = 'openai' | 'anthropic' | 'gemini' | 'ollama';
 
 export interface AdvisorSettings {
   provider: Provider;
   model: string;
-  apiKey: string;
   baseUrl: string;
+  // The API key is no longer persisted here — it lives in the OS
+  // credential manager (Windows Credential Manager / macOS Keychain /
+  // Linux libsecret) and is fetched on demand via `getApiKey()`. The
+  // webview's localStorage is a plaintext file on disk, so storing keys
+  // there is a confidentiality hole (sync folders, disk forensics, etc.).
 }
 
-const STORAGE_KEY = 'pinkbin.advisor';
+/// The single keyring slot we use for the advisor's API key. The
+/// frontend treats this as an opaque id — it has no inherent meaning to
+/// the webview beyond being a reference to ask the backend about.
+export const ADVISOR_KEY_ACCOUNT = 'pinkbin:advisor-key';
+
+export interface ChatImage {
+  dataUrl: string;
+  mimeType: string;
+}
+
+export interface CompletionRequest {
+  system: string;
+  user: string;
+  images?: ChatImage[];
+  jsonMode?: boolean;
+  signal?: AbortSignal;
+  onChunk?: (text: string) => void;
+}
 
 export function loadSettings(): AdvisorSettings | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as AdvisorSettings;
-    if (!parsed.provider || !parsed.model) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+  const parsed = getJson<AdvisorSettings | null>('advisor', null);
+  if (!parsed) return null;
+  if (!parsed.provider || !parsed.model) return null;
+  return parsed;
 }
 
 export function saveSettings(s: AdvisorSettings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+  setJson('advisor', s);
 }
 
 export function clearSettings() {
-  localStorage.removeItem(STORAGE_KEY);
+  removeKey('advisor');
 }
 
-const SYSTEM_PROMPT = `You are Pinkbin's local file advisor. Given a folder's metadata, decide what it is and whether it can be cleaned. Reply in strict JSON ONLY, matching this schema exactly:
-
-{
-  "what": "string",
-  "category": "browser_cache|app_cache|package_cache|build_artifact|game_data|user_content|system|model_weights|unknown",
-  "safe_to_delete": true|false,
-  "risk": "low|medium|high",
-  "action": "keep|recycle|delete|custom",
-  "reasoning": "short string, one sentence",
-  "needs_inspection": true|false,
-  "suggested_scaffold": "string or null"
+/// `true` if the user has both a model and (for non-Ollama providers)
+/// an API key. Async because the key check now requires a round-trip
+/// to the OS credential store via the backend.
+export async function isConfiguredAsync(
+  s: AdvisorSettings | null,
+): Promise<boolean> {
+  if (!s) return false;
+  if (s.provider === 'ollama') return Boolean(s.model?.trim());
+  if (!s.model?.trim()) return false;
+  const key = await getApiKey();
+  return Boolean(key?.trim());
 }
 
-Rules:
-- Be conservative. If uncertain, set needs_inspection=true and action="keep".
-- "user_content" (Documents/Pictures/Music/Source code) is never safe_to_delete.
-- "model_weights" (HuggingFace, Ollama models) is medium risk: deletable but expensive to redownload.
-- Do not include any prose outside the JSON object.`;
+/// Cached `loadSecret` result. The key is only fetched once per session
+/// (until the next `invalidateApiKey` call after a save/wipe). This keeps
+/// the per-chat round-trip cost down — the chat can fire 10 requests
+/// during streaming without re-reading the keychain 10 times.
+let cachedKey: { value: string | null } | null = null;
+
+export async function getApiKey(): Promise<string | null> {
+  if (cachedKey) return cachedKey.value;
+  // Lazy import to avoid a circular dep with `./api`.
+  const { api } = await import('./api');
+  const v = await api.loadSecret(ADVISOR_KEY_ACCOUNT);
+  cachedKey = { value: v ?? null };
+  return cachedKey.value;
+}
+
+/// Drop the in-memory key cache. Call after `storeSecret` / `deleteSecret`
+/// so the next `getApiKey()` re-reads from the keychain.
+export function invalidateApiKey() {
+  cachedKey = null;
+}
+
+// ─── Provider table ─────────────────────────────────────────────────────
+
+type FormatArgs = {
+  system: string;
+  user: string;
+  images?: ChatImage[];
+  jsonMode: boolean;
+  model: string;
+  stream: boolean;
+};
+
+type ProviderConfig = {
+  defaultBaseUrl: string;
+  url: (s: AdvisorSettings, key: string, stream: boolean) => string;
+  headers: (s: AdvisorSettings, key: string) => Record<string, string>;
+  formatRequest: (args: FormatArgs) => unknown;
+  extract: (data: unknown) => string;
+  extractDelta: (event: unknown) => string;
+};
+
+const PROVIDERS: Record<Provider, ProviderConfig> = {
+  openai: {
+    defaultBaseUrl: 'https://api.openai.com/v1',
+    url: (s) => {
+      const base = (s.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
+      return `${base}/chat/completions`;
+    },
+    headers: (_s, key) => ({
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+    }),
+    formatRequest: ({ system, user, images, jsonMode, model, stream }) => {
+      const userContent: unknown = !images || images.length === 0
+        ? user
+        : [
+            { type: 'text', text: user },
+            ...images.map((img) => ({ type: 'image_url', image_url: { url: img.dataUrl } })),
+          ];
+      const body: Record<string, unknown> = {
+        model,
+        stream,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userContent },
+        ],
+      };
+      if (jsonMode) body.response_format = { type: 'json_object' };
+      return body;
+    },
+    extract: (data) => extractField(data, ['choices', 0, 'message', 'content']),
+    extractDelta: (event) => extractField(event, ['choices', 0, 'delta', 'content']),
+  },
+  anthropic: {
+    defaultBaseUrl: 'https://api.anthropic.com',
+    url: (s) => {
+      const base = (s.baseUrl || 'https://api.anthropic.com').replace(/\/$/, '');
+      return `${base}/v1/messages`;
+    },
+    headers: (_s, key) => ({
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    }),
+    formatRequest: ({ system, user, images, model, stream }) => {
+      const content: unknown[] = [];
+      if (images && images.length > 0) {
+        for (const img of images) {
+          content.push({
+            type: 'image',
+            source: { type: 'base64', media_type: img.mimeType, data: dataUrlBase64(img.dataUrl) },
+          });
+        }
+      }
+      content.push({ type: 'text', text: user });
+      return {
+        model,
+        max_tokens: stream ? 4096 : 2048,
+        stream,
+        system,
+        messages: [{ role: 'user', content }],
+      };
+    },
+    extract: extractAnthropicText,
+    extractDelta: (event) => {
+      const e = event as { type?: string; delta?: { type?: string; text?: string } };
+      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta') {
+        return e.delta.text ?? '';
+      }
+      return '';
+    },
+  },
+  gemini: {
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
+    url: (s, key, stream) => {
+      const base = (s.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+      const endpoint = stream ? 'streamGenerateContent' : 'generateContent';
+      return `${base}/v1beta/models/${encodeURIComponent(s.model)}:${endpoint}?key=${encodeURIComponent(key)}`;
+    },
+    headers: () => ({ 'Content-Type': 'application/json' }),
+    formatRequest: ({ system, user, images, jsonMode, stream }) => {
+      const parts: unknown[] = [];
+      if (images && images.length > 0) {
+        for (const img of images) {
+          parts.push({ inline_data: { mime_type: img.mimeType, data: dataUrlBase64(img.dataUrl) } });
+        }
+      }
+      parts.push({ text: user });
+      const body: Record<string, unknown> = {
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts }],
+      };
+      if (jsonMode) {
+        body.generationConfig = { responseMimeType: 'application/json', temperature: 0.2 };
+      } else if (stream) {
+        body.generationConfig = { temperature: 0.4 };
+      } else {
+        body.generationConfig = { temperature: 0.2 };
+      }
+      return body;
+    },
+    extract: (data) => extractField(data, ['candidates', 0, 'content', 'parts', 0, 'text']),
+    extractDelta: (event) => extractField(event, ['candidates', 0, 'content', 'parts', 0, 'text']),
+  },
+  ollama: {
+    defaultBaseUrl: 'http://localhost:11434',
+    url: (s) => {
+      const base = (s.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
+      return `${base}/api/chat`;
+    },
+    headers: () => ({ 'Content-Type': 'application/json' }),
+    formatRequest: ({ system, user, images, model, stream }) => {
+      const userMsg: Record<string, unknown> = { role: 'user', content: user };
+      if (images && images.length > 0) userMsg.images = images.map((i) => dataUrlBase64(i.dataUrl));
+      return {
+        model,
+        stream,
+        messages: [
+          { role: 'system', content: system },
+          userMsg,
+        ],
+      };
+    },
+    extract: (data) => extractField(data, ['message', 'content']),
+    extractDelta: (event) => extractField(event, ['message', 'content']),
+  },
+};
+
+// ─── Public API ──────────────────────────────────────────────────────────
+
+export async function runCompletion(
+  settings: AdvisorSettings,
+  key: string,
+  req: CompletionRequest,
+): Promise<string> {
+  const cfg = PROVIDERS[settings.provider];
+  if (!cfg) throw new Error(`Unknown provider: ${settings.provider}`);
+
+  const stream = Boolean(req.onChunk) && !req.jsonMode;
+  const url = cfg.url(settings, key, stream);
+  const headers = cfg.headers(settings, key);
+  const body = cfg.formatRequest({
+    system: req.system,
+    user: req.user,
+    images: req.images,
+    jsonMode: Boolean(req.jsonMode),
+    model: settings.model,
+    stream,
+  });
+
+  const r = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: req.signal,
+  });
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '');
+    throw new Error(`${settings.provider} ${r.status}: ${errText}`);
+  }
+
+  if (stream && r.body) {
+    const text = await consumeSSE(r.body, cfg, req.onChunk!, req.signal);
+    return req.jsonMode ? stripCodeFence(text) : text;
+  }
+  const data = await r.json();
+  const text = cfg.extract(data);
+  return req.jsonMode ? stripCodeFence(text) : text;
+}
+
+export async function callAdvisor(
+  settings: AdvisorSettings,
+  req: AdvisorRequest,
+): Promise<AdvisorResponse> {
+  const key = await getApiKey();
+  if (!key && settings.provider !== 'ollama') {
+    throw new Error('AI 未配置 — 在右上角的设置里填一个 API key');
+  }
+  // Scrub the JSON payload before it leaves the webview: collapse paths
+  // (hides username / machine name) and strip prompt-injection tokens
+  // (filenames that try to coerce the model). See privacy.ts.
+  const safeReq = redactAdvisorRequest(req as unknown as Parameters<typeof redactAdvisorRequest>[0]);
+  const userPrompt = JSON.stringify(safeReq, null, 2);
+  const text = await runCompletion(settings, key ?? '', {
+    system: SYSTEM_PROMPT,
+    user: userPrompt,
+    jsonMode: true,
+  });
+  if (!text) throw new Error('Empty response from advisor');
+  return JSON.parse(text) as AdvisorResponse;
+}
+
+export async function overviewChat(
+  summary: object,
+  opts?: { onChunk?: (text: string) => void; signal?: AbortSignal },
+): Promise<string> {
+  return runWithLoadedSettings({
+    system: OVERVIEW_SYSTEM,
+    // `buildOverviewSummary` is also annotated with PII paths (root +
+    // top_entries[].path). Walk the object once and redact every string
+    // value that looks like a path. We only touch the shape we know the
+    // helper produces — see chatUtils.ts.
+    user: JSON.stringify(redactOverviewSummary(summary), null, 2),
+    onChunk: opts?.onChunk,
+    signal: opts?.signal,
+  });
+}
+
+export async function freeChat(
+  context: string,
+  userMessage: string,
+  images?: ChatImage[],
+  opts?: { onChunk?: (text: string) => void; signal?: AbortSignal },
+): Promise<string> {
+  const userText = context ? `${context}\n\n用户的问题：${userMessage}` : userMessage;
+  return runWithLoadedSettings({
+    system: CHAT_SYSTEM,
+    user: userText,
+    images,
+    onChunk: opts?.onChunk,
+    signal: opts?.signal,
+  });
+}
+
+// ─── SSE consumer ────────────────────────────────────────────────────────
+
+async function consumeSSE(
+  body: ReadableStream<Uint8Array>,
+  cfg: ProviderConfig,
+  onChunk: (text: string) => void,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let accumulated = '';
+
+  const onAbort = () => { reader.cancel().catch(() => {}); };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const delta = parseSSEBlock(block, cfg);
+        if (delta) {
+          accumulated += delta;
+          onChunk(delta);
+        }
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+    // Trailing block without final blank line.
+    if (buffer.trim()) {
+      const delta = parseSSEBlock(buffer, cfg);
+      if (delta) {
+        accumulated += delta;
+        onChunk(delta);
+      }
+    }
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+
+  return accumulated;
+}
+
+function parseSSEBlock(block: string, cfg: ProviderConfig): string {
+  let dataStr = '';
+  for (const line of block.split('\n')) {
+    if (line.startsWith('data:')) {
+      dataStr += line.startsWith('data: ') ? line.slice(6) : line.slice(5);
+    }
+  }
+  if (!dataStr || dataStr === '[DONE]') return '';
+  try {
+    return cfg.extractDelta(JSON.parse(dataStr));
+  } catch {
+    return '';
+  }
+}
+
+// ─── Internal helpers ────────────────────────────────────────────────────
+
+async function runWithLoadedSettings(
+  args: {
+    system: string;
+    user: string;
+    images?: ChatImage[];
+    onChunk?: (text: string) => void;
+    signal?: AbortSignal;
+  },
+): Promise<string> {
+  const settings = loadSettings();
+  if (!settings) {
+    throw new Error('AI 未配置 — 在右上角的设置里填一个 API key');
+  }
+  const key = await getApiKey();
+  if (!key && settings.provider !== 'ollama') {
+    throw new Error('AI 未配置 — 在右上角的设置里填一个 API key');
+  }
+  return runCompletion(settings, key ?? '', args);
+}
+
+function extractField(data: unknown, path: ReadonlyArray<string | number>): string {
+  let cur: unknown = data;
+  for (const key of path) {
+    if (cur == null || typeof cur !== 'object') return '';
+    cur = (cur as Record<string | number, unknown>)[key];
+  }
+  return typeof cur === 'string' ? cur : '';
+}
 
 function stripCodeFence(s: string): string {
   let t = s.trim();
@@ -61,6 +442,11 @@ function stripCodeFence(s: string): string {
   else if (t.startsWith('```')) t = t.slice(3);
   if (t.endsWith('```')) t = t.slice(0, -3);
   return t.trim();
+}
+
+function dataUrlBase64(dataUrl: string): string {
+  const i = dataUrl.indexOf(',');
+  return i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
 }
 
 // Anthropic 响应里 content 是 block 数组，extended-thinking 模型（如 DeepSeek
@@ -85,240 +471,51 @@ function extractAnthropicText(data: unknown): string {
   return text;
 }
 
-export async function callAdvisor(
-  settings: AdvisorSettings,
-  req: AdvisorRequest,
-): Promise<AdvisorResponse> {
-  const userPrompt = JSON.stringify(req, null, 2);
-  let raw = '';
+// `buildOverviewSummary` (chatUtils.ts) produces a fixed shape:
+//   { root, total_size_human, total_files, top_entries: [{ path, ... }] }
+// We only need to redact the path fields; everything else is size/count
+// data and not user-identifying.
+function redactOverviewSummary(summary: object): object {
+  const s = summary as {
+    root?: string;
+    top_entries?: Array<{ path?: string; [k: string]: unknown }>;
+    [k: string]: unknown;
+  };
+  return {
+    ...s,
+    root: typeof s.root === 'string' ? redactPath(redactSample(s.root)) : s.root,
+    top_entries: Array.isArray(s.top_entries)
+      ? s.top_entries.map((e) => ({
+          ...e,
+          path: typeof e.path === 'string' ? redactPath(redactSample(e.path)) : e.path,
+        }))
+      : s.top_entries,
+  };
+}
 
-  if (settings.provider === 'openai') {
-    const url = (settings.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
-    const r = await fetch(`${url}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${settings.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-      }),
-    });
-    if (!r.ok) throw new Error(`OpenAI ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    raw = data?.choices?.[0]?.message?.content ?? '';
-  } else if (settings.provider === 'anthropic') {
-    const url = (settings.baseUrl || 'https://api.anthropic.com').replace(/\/$/, '');
-    const r = await fetch(`${url}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': settings.apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        max_tokens: 2048,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userPrompt }],
-      }),
-    });
-    if (!r.ok) throw new Error(`Anthropic ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    raw = extractAnthropicText(data);
-  } else if (settings.provider === 'gemini') {
-    const url = (settings.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
-    const r = await fetch(
-      `${url}/v1beta/models/${encodeURIComponent(settings.model)}:generateContent?key=${encodeURIComponent(settings.apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
-        }),
-      },
-    );
-    if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-  } else if (settings.provider === 'ollama') {
-    const url = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
-    const r = await fetch(`${url}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: settings.model,
-        format: 'json',
-        stream: false,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-      }),
-    });
-    if (!r.ok) throw new Error(`Ollama ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    raw = data?.message?.content ?? '';
+// `useChat` builds chat prompts that include JSON blocks of
+// `{ path, sample_children, sample_paths, ... }`. We export a small
+// helper to redact that shape too, so callers don't have to re-walk
+// fields by hand.
+export function redactChatContext(ctx: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...ctx };
+  if (typeof out.path === 'string') {
+    out.path = redactPath(redactSample(out.path));
   }
-
-  if (!raw) throw new Error('Empty response from advisor');
-  return JSON.parse(stripCodeFence(raw)) as AdvisorResponse;
-}
-
-export function isConfigured(s: AdvisorSettings | null): s is AdvisorSettings {
-  if (!s) return false;
-  if (s.provider === 'ollama') return Boolean(s.model);
-  return Boolean(s.apiKey && s.model);
-}
-
-const CHAT_SYSTEM = `You are Pinkbin's AI advisor — a friendly assistant that helps users figure out what their disk folders are and whether to delete them. Use the metadata you are given (the user's question references a folder by its path, size, samples). Be concise (2-4 sentences), in the user's language. If you suggest deleting, say what to delete (the whole folder vs a sub-scope) and via what mechanism (回收站 / 手动整理 / 卸载应用). Never recommend rm -rf on system paths.`;
-
-const OVERVIEW_SYSTEM = `You are Pinkbin's AI advisor. The user just finished scanning their disk. You receive a JSON summary of the largest folders. Write a friendly Chinese overview (~180-220 字) covering, in order, with empty lines between sections:
-
-【整体】 一句话概括磁盘的整体结构（操作系统 / 用户数据 / 应用 各占多少）。
-
-【这里都有什么】 点名 4-6 个最大的目录，每个一行：名字、大小、大致是什么 / 哪个软件的。要具体到软件名（例：WeChat Files = 微信聊天记录、node_modules = npm 包、HuggingFace = 模型权重）。
-
-【可以删的】 直接列出 2-4 项可以删 / 可以清理的东西，每条说清楚 ① 路径或名字 ② 删了会怎样 ③ 怎么删（回收 / 卸载 / 跑脚本）。如果某个东西看起来可以删但有风险，就不要列在这里。
-
-【不要动】 简短提一下扫描里看到的不该动的东西（系统目录 / 用户文档），一行带过。
-
-口语化中文，不要 markdown bullet（用纯文本换行就行），不要客套话。`;
-
-export interface ChatImage {
-  /** Full data URL (e.g. `data:image/png;base64,...`). */
-  dataUrl: string;
-  /** Mime type — `image/png`, `image/jpeg`, etc. Used by Anthropic / Gemini
-   *  which need it as a separate field. */
-  mimeType: string;
-}
-
-function dataUrlBase64(dataUrl: string): string {
-  const i = dataUrl.indexOf(',');
-  return i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
-}
-
-export async function overviewChat(summary: object): Promise<string> {
-  return runChatRaw(OVERVIEW_SYSTEM, JSON.stringify(summary, null, 2));
-}
-
-export async function freeChat(
-  context: string,
-  userMessage: string,
-  images?: ChatImage[],
-): Promise<string> {
-  const userText = context ? `${context}\n\n用户的问题：${userMessage}` : userMessage;
-  return runChatRaw(CHAT_SYSTEM, userText, images);
-}
-
-async function runChatRaw(system: string, user: string, images?: ChatImage[]): Promise<string> {
-  const settings = loadSettings();
-  if (!isConfigured(settings)) {
-    throw new Error('AI 未配置 — 在右上角的设置里填一个 API key');
+  if (Array.isArray(out.sample_paths)) {
+    out.sample_paths = redactSamples(out.sample_paths as string[]);
   }
-  const fullUser = user;
-  const imgs = images ?? [];
-
-  if (settings.provider === 'openai') {
-    const url = (settings.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
-    const userContent: unknown = imgs.length === 0
-      ? fullUser
-      : [
-          { type: 'text', text: fullUser },
-          ...imgs.map((img) => ({ type: 'image_url', image_url: { url: img.dataUrl } })),
-        ];
-    const r = await fetch(`${url}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
-      body: JSON.stringify({
-        model: settings.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: userContent },
-        ],
-      }),
-    });
-    if (!r.ok) throw new Error(`OpenAI ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    return data?.choices?.[0]?.message?.content?.trim() ?? '';
+  if (Array.isArray(out.top_children)) {
+    out.top_children = (out.top_children as Array<{ name: string }>).map((c) => ({
+      ...c,
+      name: redactSample(c.name),
+    }));
   }
-  if (settings.provider === 'anthropic') {
-    const url = (settings.baseUrl || 'https://api.anthropic.com').replace(/\/$/, '');
-    const userContent: unknown = imgs.length === 0
-      ? fullUser
-      : [
-          ...imgs.map((img) => ({
-            type: 'image',
-            source: { type: 'base64', media_type: img.mimeType, data: dataUrlBase64(img.dataUrl) },
-          })),
-          { type: 'text', text: fullUser },
-        ];
-    const r = await fetch(`${url}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': settings.apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        max_tokens: 4096,
-        system,
-        messages: [{ role: 'user', content: userContent }],
-      }),
-    });
-    if (!r.ok) throw new Error(`Anthropic ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    return extractAnthropicText(data);
+  if (Array.isArray(out.sample_children)) {
+    out.sample_children = (out.sample_children as Array<{ name: string }>).map((c) => ({
+      ...c,
+      name: redactSample(c.name),
+    }));
   }
-  if (settings.provider === 'gemini') {
-    const url = (settings.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
-    const parts: unknown[] = [{ text: fullUser }];
-    for (const img of imgs) {
-      parts.push({ inline_data: { mime_type: img.mimeType, data: dataUrlBase64(img.dataUrl) } });
-    }
-    const r = await fetch(
-      `${url}/v1beta/models/${encodeURIComponent(settings.model)}:generateContent?key=${encodeURIComponent(settings.apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: system }] },
-          contents: [{ role: 'user', parts }],
-          generationConfig: { temperature: 0.4 },
-        }),
-      },
-    );
-    if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
-    const data = await r.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
-  }
-  // ollama — uses `images` field (array of base64) on the message.
-  const url = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
-  const userMsg: Record<string, unknown> = { role: 'user', content: fullUser };
-  if (imgs.length > 0) userMsg.images = imgs.map((i) => dataUrlBase64(i.dataUrl));
-  const r = await fetch(`${url}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: settings.model,
-      stream: false,
-      messages: [
-        { role: 'system', content: system },
-        userMsg,
-      ],
-    }),
-  });
-  if (!r.ok) throw new Error(`Ollama ${r.status}: ${await r.text()}`);
-  const data = await r.json();
-  return data?.message?.content?.trim() ?? '';
+  return out;
 }

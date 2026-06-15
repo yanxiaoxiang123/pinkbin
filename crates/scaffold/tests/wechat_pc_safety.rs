@@ -1,72 +1,13 @@
 //! Regression test for `scaffolds/wechat-pc.toml`: every scope glob must match
 //! the paths it advertises, and **must not** match WeChat red lines (chat DBs,
 //! account state, favorites, Moments, etc.). This file is the executable form
-//! of the red-line clauses in `docs/scaffold-requirements/messaging.md`.
-//!
-//! Also asserts the [match] block's behavior — basename + must_have_child must
-//! tag real data dirs (`xwechat_files`, `WeChat Files`) without false-positiving
-//! on third-party dirs whose name happens to contain "wechat" (e.g. WPS Office's
-//! `uploadwechatfile`, the install dir's `WeChatPlayer.bin`).
 
-use std::path::{Path, PathBuf};
+mod test_utils;
 
-fn workspace_root() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // out of crates/scaffold
-    p.pop(); // out of crates
-    p
-}
+use std::path::Path;
 
 fn load_wechat_pc() -> pinkbin_scaffold::Scaffold {
-    let path = workspace_root().join("scaffolds/wechat-pc.toml");
-    let text = std::fs::read_to_string(&path).expect("read wechat-pc.toml");
-    toml::from_str(&text).expect("parse wechat-pc.toml")
-}
-
-fn build_set(pattern: &str) -> globset::GlobSet {
-    let g = globset::GlobBuilder::new(pattern)
-        .literal_separator(false)
-        .case_insensitive(true)
-        .build()
-        .unwrap_or_else(|e| panic!("bad glob `{pattern}`: {e}"));
-    let mut b = globset::GlobSetBuilder::new();
-    b.add(g);
-    b.build().unwrap()
-}
-
-/// Mirror the env-var expansion used by `scaffold::expand_env` for `%VAR%` syntax.
-fn expand(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if let Some(end) = bytes[i + 1..].iter().position(|&b| b == b'%') {
-                let var = std::str::from_utf8(&bytes[i + 1..i + 1 + end]).unwrap_or("");
-                if let Ok(v) = std::env::var(var) {
-                    out.push_str(&v.replace('\\', "/"));
-                    i += end + 2;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn matching_scopes<'a>(scopes: &'a [(String, globset::GlobSet)], path: &str) -> Vec<&'a str> {
-    scopes
-        .iter()
-        .filter_map(|(id, gs)| {
-            if gs.is_match(path) {
-                Some(id.as_str())
-            } else {
-                None
-            }
-        })
-        .collect()
+    test_utils::load_scaffold("scaffolds/wechat-pc.toml")
 }
 
 #[test]
@@ -79,7 +20,7 @@ fn wechat_pc_globs_are_safe() {
     let scopes: Vec<(String, globset::GlobSet)> = scaffold
         .scopes
         .iter()
-        .map(|s| (s.id.clone(), build_set(&expand(&s.glob))))
+        .map(|s| (s.id.clone(), test_utils::build_set(&test_utils::expand(&s.glob))))
         .collect();
 
     // Every scope id should appear at least once in either positives or the
@@ -132,7 +73,7 @@ fn wechat_pc_globs_are_safe() {
     ];
 
     for (expected_id, p) in positives {
-        let hits = matching_scopes(&scopes, p);
+        let hits = test_utils::matching_scopes(&scopes, p);
         assert!(
             hits.contains(expected_id),
             "expected scope `{expected_id}` to match `{p}`, but matched {hits:?}",
@@ -160,7 +101,7 @@ fn wechat_pc_globs_are_safe() {
         ),
     ];
     for (forbidden_id, p) in cross_bucket {
-        let hits = matching_scopes(&scopes, p);
+        let hits = test_utils::matching_scopes(&scopes, p);
         assert!(
             !hits.contains(forbidden_id),
             "scope `{forbidden_id}` must NOT match `{p}` (cross-bucket leak); got {hits:?}",
@@ -221,7 +162,7 @@ fn wechat_pc_globs_are_safe() {
 
     let mut violations = Vec::new();
     for p in red_lines {
-        let hits = matching_scopes(&scopes, p);
+        let hits = test_utils::matching_scopes(&scopes, p);
         if !hits.is_empty() {
             violations.push(format!("`{p}` -> {hits:?}"));
         }

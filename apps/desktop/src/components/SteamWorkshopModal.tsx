@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import clsx from 'clsx';
 import { X, Boxes, RefreshCw, ExternalLink, RotateCcw } from 'lucide-react';
 import { api } from '../api';
 import type { SteamGame, WorkshopItem } from '../types';
 import { formatBytes } from '../format';
+import { getJson, setJson } from '../persist';
 
 /// localStorage cache keyed by stringified item ID. Workshop titles are
 /// extremely stable (renames are rare and not safety-critical), so we cache
@@ -10,30 +12,19 @@ import { formatBytes } from '../format';
 /// trip entirely. This is what makes the demo robust against flaky
 /// connectivity to api.steampowered.com from mainland China: once you've
 /// fetched successfully even once, every subsequent run is offline-clean.
-const CACHE_KEY = 'pinkbin.workshopTitles';
 
 function readTitleCache(): Record<number, string> {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, string>;
-    const out: Record<number, string> = {};
-    for (const [k, v] of Object.entries(parsed)) {
-      const n = Number(k);
-      if (Number.isFinite(n) && typeof v === 'string') out[n] = v;
-    }
-    return out;
-  } catch {
-    return {};
+  const parsed = getJson<Record<string, string>>('workshopTitles', {});
+  const out: Record<number, string> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    const n = Number(k);
+    if (Number.isFinite(n) && typeof v === 'string') out[n] = v;
   }
+  return out;
 }
 
 function writeTitleCache(titles: Record<number, string>) {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(titles));
-  } catch {
-    /* quota / private mode */
-  }
+  setJson('workshopTitles', titles);
 }
 
 /// Modal listing one game's installed Steam Workshop items. Lazily-loaded
@@ -178,13 +169,13 @@ export function SteamWorkshopModal({
             <div className="steam-workshop-toolbar">
               <span className="steam-workshop-toolbar-label">排序</span>
               <button
-                className={'steam-workshop-sortbtn' + (sortBy === 'oldest' ? ' active' : '')}
+                className={clsx('steam-workshop-sortbtn', sortBy === 'oldest' && 'active')}
                 onClick={() => setSortBy('oldest')}
               >
                 按最久没更新
               </button>
               <button
-                className={'steam-workshop-sortbtn' + (sortBy === 'size' ? ' active' : '')}
+                className={clsx('steam-workshop-sortbtn', sortBy === 'size' && 'active')}
                 onClick={() => setSortBy('size')}
               >
                 按占用大小

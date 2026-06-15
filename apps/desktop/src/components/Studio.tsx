@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useMemo, useState } from 'react';
+import clsx from 'clsx';
 import { ChevronRight, ChevronDown, Sparkles, MessageSquare, Trash2, FolderOpen, Copy, ExternalLink, Gamepad2 } from 'lucide-react';
 import { useStore } from '../store';
 import { formatBytes } from '../format';
@@ -6,8 +7,12 @@ import { api } from '../api';
 import type { Node, Scaffold } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ContextMenu, type ContextMenuState } from './ContextMenu';
-import { CleanupModal } from './CleanupModal';
-import { SteamInspectorModal } from './SteamInspectorModal';
+import { getBool } from '../persist';
+import { collectScaffoldMatches } from '../tree';
+import './Studio.css';
+
+const CleanupModal = lazy(() => import('./CleanupModal').then((m) => ({ default: m.CleanupModal })));
+const SteamInspectorModal = lazy(() => import('./SteamInspectorModal').then((m) => ({ default: m.SteamInspectorModal })));
 
 const FEATURED_IDS = [
   'wechat-pc',
@@ -36,9 +41,7 @@ function findAllMatchesByScaffold(root: Node | null, scaffoldId: string): Node[]
   };
   dfs(root);
   return out;
-}
-
-function fallbackByNameContains(root: Node | null, sc: Scaffold): Node | null {
+}function fallbackByNameContains(root: Node | null, sc: Scaffold): Node | null {
   const fragments = (sc.match?.name_contains ?? []).map((s) => s.toLowerCase());
   if (fragments.length === 0 || !root) return null;
   const dfs = (n: Node | null): Node | null => {
@@ -66,17 +69,20 @@ export function Studio() {
   const scaffolds = useStore((s) => s.scaffolds);
   const requestStudio = useStore((s) => s.requestStudio);
 
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [openTool, setOpenTool] = useState<null | 'steam-inspector'>(null);
 
-  const hidden = (() => {
-    try { return localStorage.getItem('pinkbin.hideStudio') === '1'; } catch { return false; }
-  })();
+  // expanded set persisted to localStorage via the store; survives restarts.
+  const expandedArr = useStore((s) => s.studioExpanded);
+  const expanded = useMemo(() => new Set(expandedArr), [expandedArr]);
+  const toggleExpanded = useStore((s) => s.toggleStudioExpanded);
+
+  const hidden = getBool('hideStudio', false);
+  const scanInProgress = useStore((s) => s.scanInProgress);
 
   const allCards: CardData[] = useMemo(() => {
     if (hidden) return [];
     const items: CardData[] = scaffolds.map((sc) => {
-      let matches = findAllMatchesByScaffold(root, sc.id);
+      let matches = collectScaffoldMatches(root, sc.id);
       if (matches.length === 0) {
         const fb = fallbackByNameContains(root, sc);
         if (fb) matches = [fb];
@@ -111,21 +117,18 @@ export function Studio() {
   const featured = allCards.filter((c) => FEATURED_IDS.includes(c.scaffold.id));
   const others = allCards.filter((c) => !FEATURED_IDS.includes(c.scaffold.id));
 
-  const toggle = (id: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  const toggle = (id: string) => toggleExpanded(id);
 
   return (
-    <div className="studio">
+    <div className={clsx('studio', scanInProgress && 'stale')}>
       <div className="studio-head">
         <span>Studio</span>
         <span className="muted small">{allCards.length} 个脚本</span>
       </div>
+
+      {allCards.length === 0 && !scanInProgress && (
+        <div className="studio-empty muted">脚本加载中…</div>
+      )}
 
       <div className="studio-section-label">推荐</div>
       <div className="studio-grid">
@@ -158,7 +161,9 @@ export function Studio() {
       )}
 
       {openTool === 'steam-inspector' && (
-        <SteamInspectorModal onClose={() => setOpenTool(null)} />
+        <Suspense fallback={<div className="modal-bg">加载中…</div>}>
+          <SteamInspectorModal onClose={() => setOpenTool(null)} />
+        </Suspense>
       )}
     </div>
   );
@@ -237,7 +242,7 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
   const hiddenChildrenCount = Math.max(0, topChildrenAll.length - topChildren.length);
 
   return (
-    <div className={'studio-card-wrap risk-' + sc.risk + (detected ? ' detected' : '')}>
+    <div className={clsx('studio-card-wrap', `risk-${sc.risk}`, detected && 'detected')}>
       <button
         className="studio-card"
         onClick={onToggle}
@@ -261,7 +266,7 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
             <>
               <div className="studio-detail-row">
                 <span className="studio-detail-label">路径</span>
-                <span style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+                <div className="studio-detail-paths">
                   {matches.map((m) => (
                     <span
                       key={m.path}
@@ -277,32 +282,31 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
                     >
                       {m.path}
                       {matches.length > 1 && (
-                        <span className="muted small" style={{ marginLeft: 6 }}>
+                        <span className="muted small studio-detail-suffix">
                           {formatBytes(m.size)}
                         </span>
                       )}
                     </span>
                   ))}
-                </span>
+                </div>
               </div>
               <div className="studio-detail-row">
                 <span className="studio-detail-label">大小</span>
                 <span className="mono-num">
                   {formatBytes(card.totalSize)} · {card.totalFiles.toLocaleString()} 文件
-                  {matches.length > 1 && <span className="muted small" style={{ marginLeft: 6 }}>（{matches.length} 处合计）</span>}
+                  {matches.length > 1 && <span className="muted small studio-detail-suffix">（{matches.length} 处合计）</span>}
                 </span>
               </div>
 
               {topChildrenAll.length > 0 && (
                 <>
-                  <div className="studio-detail-label" style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div className="studio-detail-label studio-top-children-head">
                     <span>占用最大的子项</span>
                     {topChildrenAll.length > 3 && (
                       <button
                         type="button"
-                        className="ghost"
+                        className="ghost studio-toggle-btn"
                         onClick={() => setShowAllChildren((v) => !v)}
-                        style={{ fontSize: 10.5, padding: '0 6px' }}
                       >
                         {showAllChildren
                           ? '收起'
@@ -335,8 +339,10 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
                 <button
                   className="primary studio-cleanup-btn"
                   onClick={() => setShowCleanup(true)}
+                  disabled={card.totalSize === 0}
+                  title={card.totalSize === 0 ? '目录为空，无需清理' : undefined}
                 >
-                  <Trash2 size={12} /> 配置清理…
+                  <Trash2 size={12} /> {card.totalSize === 0 ? '空目录' : '配置清理…'}
                 </button>
                 <button className="secondary studio-ask-btn" onClick={onAsk}>
                   <MessageSquare size={12} /> 问 AI
@@ -349,9 +355,9 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
               <ul className="studio-children muted small">
                 {sc.detect.slice(0, 4).map((p) => <li key={p}>{p}</li>)}
               </ul>
-              <div className="studio-detail-label" style={{ marginTop: 6 }}>说明</div>
-              <p className="muted small" style={{ margin: '4px 0' }}>{sc.disclaimer}</p>
-              <button className="primary studio-ask-btn" onClick={onAsk} style={{ marginTop: 6 }}>
+              <div className="studio-detail-label">说明</div>
+              <p className="muted small studio-disclaimer-text">{sc.disclaimer}</p>
+              <button className="primary studio-ask-btn studio-top-cta" onClick={onAsk}>
                 <MessageSquare size={12} /> 问 AI：它一般在哪、能不能删
               </button>
             </>
@@ -360,12 +366,14 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
       )}
 
       {showCleanup && detected && (
-        <CleanupModal
-          scaffold={sc}
-          matches={matches}
-          onClose={() => setShowCleanup(false)}
-          onCleaned={(bytes) => addReclaimed(bytes)}
-        />
+        <Suspense fallback={<div className="modal-bg">加载中…</div>}>
+          <CleanupModal
+            scaffold={sc}
+            matches={matches}
+            onClose={() => setShowCleanup(false)}
+            onCleaned={(bytes) => addReclaimed(bytes)}
+          />
+        </Suspense>
       )}
       <ContextMenu state={ctx} onClose={() => setCtx(null)} />
     </div>

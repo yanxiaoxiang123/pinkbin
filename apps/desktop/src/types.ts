@@ -13,6 +13,10 @@ export interface Node {
   children: Node[];
   scaffold_id?: string | null;
   top_extensions: ExtShare[];
+  /// File paths within depth 3 of this directory, capped at 8. Populated
+  /// during the scan (see `SAMPLE_LIMIT_PER_DIR` in `crates/scanner`); the
+  /// chat AI reads this directly instead of triggering N inspect IPC calls.
+  sample_paths?: string[];
 }
 
 export type Risk = 'low' | 'medium' | 'high';
@@ -65,12 +69,12 @@ export interface AdvisorResponse {
   reasoning: string;
   needs_inspection: boolean;
   suggested_scaffold?: string | null;
-}
-
-export interface Plan {
-  action: 'recycle' | 'quarantine' | 'delete';
-  paths: string[];
-  reason: string;
+  /// `true` when the response is a canned / synthesized fallback rather
+  /// than a real model output. The UI must surface a warning and must
+  /// refuse to act on `action` / `safe_to_delete` — users have been
+  /// bitten by silent fallbacks that said "safe to delete" for things
+  /// the real model would have flagged.
+  is_fallback?: boolean;
 }
 
 export interface UndoEntry {
@@ -79,6 +83,15 @@ export interface UndoEntry {
   source: string;
   destination?: string | null;
   reason: string;
+}
+
+/// One scope whose compiled glob matches a given path. Returned by
+/// `find_scope_for_path` so chat callers can pick a scope before invoking
+/// `execute_plan` (which now requires scaffold_id + scope_id).
+export interface ScopeMatch {
+  scaffold_id: string;
+  scope_id: string;
+  mode: 'recycle' | 'quarantine' | 'delete';
 }
 
 /// Mirror of Rust's CondaEnv (apps/desktop/src-tauri/src/lib.rs). Returned

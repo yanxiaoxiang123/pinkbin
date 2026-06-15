@@ -4,15 +4,29 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use include_dir::{include_dir, Dir};
-use pinkbin_advisor::{advise as advise_provider, AdvisorRequest, AdvisorResponse, Provider};
+use pinkbin_advisor::{
+    advise as advise_provider, AdvisorRequest, AdvisorResponse, Provider, SecretString,
+};
 use pinkbin_executor::{execute, Plan, UndoEntry};
 use pinkbin_scaffold::{
     compile_all, detect_compiled, detect_for, expand_env, load_dir, parse_toml, CompiledScaffold,
     RecycleGranularity, Scaffold,
 };
 use pinkbin_scanner::{sample_paths, scan_with_stats, Node, ScanOptions, ScanStats};
+use pinkbin_walker::{
+    find_matching_dirs, is_pruned_system_dir, mtime_older_than, path_passes_env, path_passes_wxid,
+    pinkbin_walker, PRUNED_SYSTEM_DIRS,
+};
 
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_keyring::KeyringExt;
+
+/// The single keyring slot the app uses. The frontend treats this as an
+/// opaque id — only the service/user name is shipped in IPC; the secret
+/// value lives in the OS credential manager (Windows Credential Manager /
+/// macOS Keychain / Linux libsecret), never in the webview's localStorage.
+const KEYRING_SERVICE: &str = "com.pinkbin.desktop";
+const ADVISOR_KEY_ACCOUNT: &str = "pinkbin:advisor-key";
 
 // Compile-time embed of repo-root scaffolds/. Used as the lowest-priority
 // fallback in load_all_scaffolds so a portable raw exe (no resource_dir,
@@ -110,6 +124,13 @@ fn tag_and_truncate(node: &mut Node, compiled: &[CompiledScaffold], depth: usize
     for c in &mut node.children {
         tag_and_truncate(c, compiled, depth + 1);
     }
+
+    // Pre-compute tagged_descendant in post-order: after children are
+    // processed, each child's scaffold_id + tagged_descendant is final.
+    // This avoids O(N²) subtree traversal during truncation partitioning.
+    node.tagged_descendant = node.scaffold_id.is_some()
+        || node.children.iter().any(|c| c.tagged_descendant);
+
     let cap = if depth < 2 {
         100
     } else if depth < 4 {
@@ -118,12 +139,8 @@ fn tag_and_truncate(node: &mut Node, compiled: &[CompiledScaffold], depth: usize
         20
     };
     if node.children.len() > cap {
-        // Partition tagged subtrees first (preserving their original size-desc
-        // order), then fill remaining slots from the rest. Cap the tagged group
-        // at `cap` too, so a freak case with > cap matches at one level still
-        // produces a bounded tree.
         let (tagged, rest): (Vec<Node>, Vec<Node>) =
-            node.children.drain(..).partition(has_scaffold_tag);
+            node.children.drain(..).partition(|c| c.tagged_descendant);
         let mut survivors: Vec<Node> = tagged.into_iter().take(cap).collect();
         let need = cap.saturating_sub(survivors.len());
         survivors.extend(rest.into_iter().take(need));
@@ -131,12 +148,6 @@ fn tag_and_truncate(node: &mut Node, compiled: &[CompiledScaffold], depth: usize
         survivors.sort_by_key(|c| std::cmp::Reverse(c.size));
         node.children = survivors;
     }
-}
-
-/// True if `n` itself, or any descendant, has a scaffold_id assigned. Used by
-/// `tag_and_truncate` to decide which subtrees must survive truncation.
-fn has_scaffold_tag(n: &Node) -> bool {
-    n.scaffold_id.is_some() || n.children.iter().any(has_scaffold_tag)
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -285,161 +296,63 @@ struct ScopeSize {
 
 /// Walk `root_path` and tally how many bytes / files each `[[scope]]` glob
 /// True when `path`'s first `wxid_*` segment is in `allow`. Paths with no
-/// `wxid_*` segment (e.g. `all_users/`, `%APPDATA%/Tencent/xwechat/log/`)
-/// always pass — those are cross-account or roaming-only data that aren't
-/// wxid-scoped. `None` or an empty allow-list disables the filter entirely.
-fn path_passes_wxid(path: &Path, wxid_filter: Option<&[String]>) -> bool {
-    let Some(allowed) = wxid_filter else {
-        return true;
-    };
-    if allowed.is_empty() {
-        return true;
-    }
-    for component in path.components() {
-        if let Some(s) = component.as_os_str().to_str() {
-            if s.starts_with("wxid_") {
-                return allowed.iter().any(|w| w == s);
-            }
-        }
-    }
-    true
+/// `wxid_*` segment always pass. `None` or an empty allow-list disables.
+/// Provided by pinkbin-walker crate.
+
+fn compile_scope_set(glob: &str) -> Result<globset::GlobSet, String> {
+    let pattern = expand_env(glob);
+    let g = globset::GlobBuilder::new(&pattern)
+        .literal_separator(false)
+        .case_insensitive(true)
+        .build()
+        .map_err(|e| format!("invalid glob {glob:?}: {e}"))?;
+    let mut b = globset::GlobSetBuilder::new();
+    b.add(g);
+    b.build().map_err(|e| e.to_string())
 }
 
-/// True when `path` has an `envs/<name>` segment whose `<name>` is in `allow`,
-/// OR has no `envs/` segment at all (paths from non-env scopes pass through —
-/// `pkgs/cache/foo`, `<conda-root>/python.exe`, etc.). Mirrors `path_passes_wxid`'s
-/// "filter only narrows the targeted layer" semantics so a single
-/// `execute_scope` call can carry both filters across mixed scopes.
-/// `None` or empty allow-list disables the filter entirely.
-fn path_passes_env(path: &Path, env_filter: Option<&[String]>) -> bool {
-    let Some(allowed) = env_filter else {
-        return true;
-    };
-    if allowed.is_empty() {
-        return true;
-    }
-    let mut comps = path.components().peekable();
-    while let Some(c) = comps.next() {
-        if let Some(s) = c.as_os_str().to_str() {
-            if s.eq_ignore_ascii_case("envs") {
-                if let Some(next) = comps.peek() {
-                    if let Some(name) = next.as_os_str().to_str() {
-                        return allowed.iter().any(|n| n == name);
-                    }
-                }
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// 系统级"垃圾/卷元数据"目录名（lowercase，比较时不区分大小写）。任何 scaffold
-/// 路径扫描遇到这些目录直接整树跳过——回收站里的东西是用户已经决定先放着的，
-/// 把它们当成可清理 cache 是事故；System Volume Information 是 VSS / 索引快照，
-/// 既不可清理也容易触发权限拒绝拖慢扫描。
-const PRUNED_SYSTEM_DIRS: &[&str] = &[
-    "$recycle.bin",
-    "system volume information",
-    ".trash",
-    ".trashes",
-];
-
-fn is_pruned_system_dir(name: &std::ffi::OsStr) -> bool {
-    let Some(s) = name.to_str() else { return false };
-    let lower = s.to_ascii_lowercase();
-    PRUNED_SYSTEM_DIRS.iter().any(|p| *p == lower)
-}
-
-/// 本文件里所有 scaffold 侧路径扫描共用的 walker 构造器。两条策略集中在这里：
-/// (a) `skip_hidden(false)`——很多 app cache 落在 dotted 目录里，必须能进；
-/// (b) `process_read_dir` 在读目录时直接 prune 系统垃圾箱/卷元数据子树，
-///     比"扫完再过滤路径"省一个数量级 IO，并彻底排除"glob 撞回收站"事故面。
-/// scanner crate 的"主页大盘占用扫描"故意不走这里——那边用户期望看到回收站占用。
-fn pinkbin_walker(root: &Path) -> jwalk::WalkDir {
-    jwalk::WalkDir::new(root)
-        .skip_hidden(false)
-        .follow_links(false)
-        .process_read_dir(|_, _, _, children| {
-            children.retain(|res| {
-                let Ok(entry) = res else { return true };
-                if !entry.file_type.is_dir() {
-                    return true;
-                }
-                !is_pruned_system_dir(&entry.file_name)
-            });
-        })
-}
-
-/// Walk `root` and return directories whose path matches `glob_set`, after
-/// pruning any candidate whose ancestor is also matched. Used by directory-
-/// granularity scopes (recycle the directory as one unit, not file-by-file).
-///
-/// **Why ancestor dedup**: globset is configured with `literal_separator(false)`
-/// for backwards compat with media-bucket file scopes — meaning `*` crosses
-/// `/`. A glob like `**/pkgs/*` matches both `pkgs/numpy` AND `pkgs/numpy/info`;
-/// dedup keeps only the shallowest match per subtree so the recycle plan
-/// touches each logical unit exactly once. `path == root` is dropped
-/// unconditionally — even if a misconfigured glob hits root, recycling the
-/// scan root would nuke the user's whole conda install.
-fn find_matching_dirs(
+/// Walk `root` and return paths matching `set`, subject to filters.
+/// Directory-granularity scopes delegate to `find_matching_dirs`.
+fn resolve_scope_paths(
     root: &Path,
-    glob_set: &globset::GlobSet,
+    set: &globset::GlobSet,
+    granularity: RecycleGranularity,
     wxid_filter: Option<&[String]>,
     env_filter: Option<&[String]>,
     older_than_days: Option<u32>,
 ) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for entry in pinkbin_walker(root).into_iter().flatten() {
-        if !entry.file_type().is_dir() {
-            continue;
+    match granularity {
+        RecycleGranularity::Directory => {
+            find_matching_dirs(root, set, wxid_filter, env_filter, older_than_days)
         }
-        let path = entry.path();
-        if path == root {
-            continue;
-        }
-        if !path_passes_wxid(&path, wxid_filter) || !path_passes_env(&path, env_filter) {
-            continue;
-        }
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !mtime_older_than(&metadata, older_than_days) {
-            continue;
-        }
-        let path_str = path.to_string_lossy().replace('\\', "/");
-        if glob_set.is_match(&path_str) {
-            candidates.push(path);
-        }
-    }
-    candidates.sort_by_key(|p| p.as_os_str().len());
-    let mut keep: Vec<PathBuf> = Vec::with_capacity(candidates.len());
-    for c in candidates {
-        if !keep.iter().any(|k| c.starts_with(k)) {
-            keep.push(c);
+        RecycleGranularity::File => {
+            let mut out = Vec::new();
+            for entry in pinkbin_walker(root).into_iter().flatten() {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if !path_passes_wxid(&path, wxid_filter)
+                    || !path_passes_env(&path, env_filter)
+                    || !mtime_older_than(&metadata, older_than_days)
+                {
+                    continue;
+                }
+                let s = path.to_string_lossy().replace('\\', "/");
+                if set.is_match(&s) {
+                    out.push(path);
+                }
+            }
+            out
         }
     }
-    keep
 }
 
-/// True when `metadata.modified()` is older than `now - days * 86400s`.
-/// `days = None` skips the filter. Files whose mtime can't be read pass —
-/// we don't silently drop data the user expects to see because of a transient
-/// OS error.
-fn mtime_older_than(metadata: &std::fs::Metadata, days: Option<u32>) -> bool {
-    let Some(d) = days else { return true };
-    let Ok(modified) = metadata.modified() else {
-        return true;
-    };
-    let threshold = SystemTime::now()
-        .checked_sub(Duration::from_secs(d as u64 * 86_400))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    modified <= threshold
-}
-
-/// in `scaffold_id` would match. Used by the Studio panel to show per-scope
-/// occupancy alongside the generic "largest sub-items" view. Files matching
+/// Return per-scope sizes for all scopes in `scaffold_id`. Files matching
 /// multiple scopes are counted once per matching scope (the same physical
 /// bytes — overlap means cleaning either scope reclaims them).
 #[tauri::command]
@@ -470,17 +383,11 @@ async fn scope_sizes(
     }
     let mut builds: Vec<ScopeBuild> = Vec::with_capacity(scaffold.scopes.len());
     for sc in &scaffold.scopes {
-        let pattern = expand_env(&sc.glob);
-        let glob = globset::GlobBuilder::new(&pattern)
-            .literal_separator(false)
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| format!("scope `{}` has invalid glob `{}`: {e}", sc.id, sc.glob))?;
-        let mut b = globset::GlobSetBuilder::new();
-        b.add(glob);
+        let set = compile_scope_set(&sc.glob)
+            .map_err(|e| format!("scope `{}`: {e}", sc.id))?;
         builds.push(ScopeBuild {
             id: sc.id.clone(),
-            set: b.build().map_err(|e| e.to_string())?,
+            set,
             granularity: sc.recycle_granularity,
         });
     }
@@ -632,55 +539,20 @@ async fn execute_scope(
         (sc, scope)
     };
 
-    let pattern = expand_env(&scope.glob);
-    let glob = globset::GlobBuilder::new(&pattern)
-        .literal_separator(false)
-        .case_insensitive(true)
-        .build()
-        .map_err(|e| format!("scope `{}` has invalid glob: {e}", scope.id))?;
-    let mut b = globset::GlobSetBuilder::new();
-    b.add(glob);
-    let set = b.build().map_err(|e| e.to_string())?;
-
+    let set = compile_scope_set(&scope.glob)
+        .map_err(|e| format!("scope `{}`: {e}", scope.id))?;
     let root = PathBuf::from(&root_path);
-    let wxid_filter_owned = wxid_filter;
-    let env_filter_owned = env_filter;
     let granularity = scope.recycle_granularity;
 
-    let matched: Vec<PathBuf> = tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
-        match granularity {
-            RecycleGranularity::Directory => find_matching_dirs(
-                &root,
-                &set,
-                wxid_filter_owned.as_deref(),
-                env_filter_owned.as_deref(),
-                older_than_days,
-            ),
-            RecycleGranularity::File => {
-                let mut out = Vec::new();
-                for entry in pinkbin_walker(&root).into_iter().flatten() {
-                    if !entry.file_type().is_file() {
-                        continue;
-                    }
-                    let p = entry.path();
-                    let metadata = match entry.metadata() {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-                    if !path_passes_wxid(&p, wxid_filter_owned.as_deref())
-                        || !path_passes_env(&p, env_filter_owned.as_deref())
-                        || !mtime_older_than(&metadata, older_than_days)
-                    {
-                        continue;
-                    }
-                    let s = p.to_string_lossy().replace('\\', "/");
-                    if set.is_match(&s) {
-                        out.push(p);
-                    }
-                }
-                out
-            }
-        }
+    let matched: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+        resolve_scope_paths(
+            &root,
+            &set,
+            granularity,
+            wxid_filter.as_deref(),
+            env_filter.as_deref(),
+            older_than_days,
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -711,7 +583,14 @@ async fn execute_scope(
         paths: matched,
         reason: format!("Pinkbin scaffold {}/{} (Studio)", scaffold.id, scope.id),
     };
-    execute(&plan, dry_run, &state.undo_log, &state.quarantine_root).map_err(|e| e.to_string())
+    let undo_log = state.undo_log.clone();
+    let quarantine_root = state.quarantine_root.clone();
+    tokio::task::spawn_blocking(move || {
+        pinkbin_executor::execute(&plan, dry_run, &undo_log, &quarantine_root)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 /// Per-env metadata for the conda card's env list. `last_active_ts` is the
@@ -905,13 +784,133 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
     }
 }
 
+/// `execute_plan` is the chat/quick-recycle entry point. Unlike `execute_scope`,
+/// it does **not** walk a root to resolve paths — the caller passes pre-resolved
+/// paths. To keep scaffold red-lines enforceable, the call must declare which
+/// `scaffold_id` + `scope_id` it claims, and the backend re-checks every path
+/// against the scope's compiled glob. A path that doesn't match is rejected.
+/// The final `Action` is derived from the scope's declared mode, never from
+/// the caller — so the frontend cannot upgrade recycle → delete.
 #[tauri::command]
-fn execute_plan(
+async fn execute_plan(
     state: State<'_, AppState>,
-    plan: Plan,
+    scaffold_id: String,
+    scope_id: String,
+    paths: Vec<String>,
+    reason: String,
     dry_run: bool,
 ) -> Result<Vec<UndoEntry>, String> {
-    execute(&plan, dry_run, &state.undo_log, &state.quarantine_root).map_err(|e| e.to_string())
+    let (scaffold, scope) = {
+        let scaffolds = state.scaffolds.lock().unwrap();
+        let sc = scaffolds
+            .iter()
+            .find(|s| s.id == scaffold_id)
+            .cloned()
+            .ok_or_else(|| format!("scaffold not found: {scaffold_id}"))?;
+        let scope = sc
+            .scopes
+            .iter()
+            .find(|s| s.id == scope_id)
+            .cloned()
+            .ok_or_else(|| format!("scope not found: {scaffold_id}/{scope_id}"))?;
+        (sc, scope)
+    };
+
+    let set = compile_scope_set(&scope.glob)
+        .map_err(|e| format!("scope `{}`: {e}", scope.id))?;
+
+    let mut matched: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let pb = PathBuf::from(&p);
+        let normalized = pb.to_string_lossy().replace('\\', "/");
+        if !set.is_match(&normalized) {
+            return Err(format!(
+                "path `{p}` is outside scope `{}/{}` glob `{}` — refusing",
+                scaffold.id, scope.id, scope.glob
+            ));
+        }
+        matched.push(pb);
+    }
+    if matched.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Derive action from the scope's declared mode, not the caller. This is
+    // the same policy `execute_scope` uses, including the directory-granularity
+    // override to Recycle.
+    let granularity = scope.recycle_granularity;
+    let action = match (granularity, scope.mode) {
+        (RecycleGranularity::Directory, _) => pinkbin_executor::Action::Recycle,
+        (RecycleGranularity::File, pinkbin_scaffold::Mode::Recycle) => {
+            pinkbin_executor::Action::Recycle
+        }
+        (RecycleGranularity::File, pinkbin_scaffold::Mode::Quarantine) => {
+            pinkbin_executor::Action::Quarantine
+        }
+        (RecycleGranularity::File, pinkbin_scaffold::Mode::Delete) => {
+            pinkbin_executor::Action::Delete
+        }
+    };
+
+    let plan = Plan {
+        action,
+        paths: matched,
+        reason: format!("{reason} [via {}/{}]", scaffold.id, scope.id),
+    };
+    let undo_log = state.undo_log.clone();
+    let quarantine_root = state.quarantine_root.clone();
+    tokio::task::spawn_blocking(move || {
+        pinkbin_executor::execute(&plan, dry_run, &undo_log, &quarantine_root)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// Return every (scaffold_id, scope_id) whose compiled glob matches `path`.
+/// Used by the chat panel to discover which scope(s) own a tree node before
+/// calling `execute_plan`. The mode is included so callers can filter to
+/// the action they intend (e.g. the chat only ever wants `recycle`).
+#[derive(serde::Serialize, Clone)]
+struct ScopeMatch {
+    scaffold_id: String,
+    scope_id: String,
+    mode: String,
+}
+
+#[tauri::command]
+async fn find_scope_for_path(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<ScopeMatch>, String> {
+    let scaffolds = state.scaffolds.lock().unwrap().clone();
+    let normalized = PathBuf::from(&path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut out = Vec::new();
+    for s in &scaffolds {
+        for sc in &s.scopes {
+            match compile_scope_set(&sc.glob) {
+                Ok(set) if set.is_match(&normalized) => {
+                    let mode = match sc.mode {
+                        pinkbin_scaffold::Mode::Recycle => "recycle",
+                        pinkbin_scaffold::Mode::Quarantine => "quarantine",
+                        pinkbin_scaffold::Mode::Delete => "delete",
+                    };
+                    out.push(ScopeMatch {
+                        scaffold_id: s.id.clone(),
+                        scope_id: sc.id.clone(),
+                        mode: mode.to_string(),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("scope {}/{}: bad glob: {e}", s.id, sc.id);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Inspect the Steam install (registry + default paths). Returns a full
@@ -1256,20 +1255,37 @@ fn open_steam_url(action: String, appid: u64) -> Result<(), String> {
 
 #[tauri::command]
 fn set_advisor(
+    app: AppHandle,
     state: State<'_, AppState>,
     provider: String,
-    api_key: Option<String>,
     model: String,
     base_url: Option<String>,
 ) -> Result<(), String> {
+    // The API key is read from the OS credential store — it is no longer
+    // shipped in this IPC payload. The frontend stores it via
+    // `store_secret` (which uses tauri-plugin-keyring) and we look it up
+    // here. This means the key never leaves the keychain + the backend's
+    // process memory, instead of being persisted in the webview's
+    // localStorage (which is a plaintext file on disk).
+    let api_key = match app.keyring().get_password(KEYRING_SERVICE, ADVISOR_KEY_ACCOUNT) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Err(
+                "advisor key not found in keychain. Open Settings and re-enter your API key."
+                    .to_string(),
+            )
+        }
+        Err(e) => return Err(format!("keychain read failed: {e}")),
+    };
+
     let p = match provider.as_str() {
         "openai" => Provider::OpenAI {
-            api_key: api_key.ok_or_else(|| "api_key required".to_string())?,
+            api_key: SecretString::new(api_key),
             model,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
         },
         "anthropic" => Provider::Anthropic {
-            api_key: api_key.ok_or_else(|| "api_key required".to_string())?,
+            api_key: SecretString::new(api_key),
             model,
             base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
         },
@@ -1278,15 +1294,73 @@ fn set_advisor(
             model,
         },
         "gemini" => Provider::Gemini {
-            api_key: api_key.ok_or_else(|| "api_key required".to_string())?,
+            api_key: SecretString::new(api_key),
             model,
             base_url: base_url
                 .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string()),
         },
+        "none" => {
+            *state.advisor.lock().unwrap() = None;
+            return Ok(());
+        }
         other => return Err(format!("unknown provider: {other}")),
     };
     *state.advisor.lock().unwrap() = Some(p);
     Ok(())
+}
+
+// ── Keyring-backed secret store ──────────────────────────────────────────
+//
+// The webview can ask the backend to put a secret in the OS credential
+// manager (`store_secret`), read it back (`load_secret`), or wipe it
+// (`delete_secret`). The frontend never sees the keychain's internals
+// beyond its own slot name; the actual secret value flows over IPC only
+// on `store_secret` (when the user just typed it) and on `load_secret`
+// (when an AI call needs to make a signed HTTP request from the webview).
+//
+// `load_secret` returns `Ok(None)` when the slot is empty so the frontend
+// can distinguish "not configured" from "keychain error". `delete_secret`
+// is idempotent — deleting a missing entry is a no-op, not an error.
+
+#[tauri::command]
+fn store_secret(
+    app: AppHandle,
+    account: String,
+    secret: String,
+) -> Result<(), String> {
+    app.keyring()
+        .set_password(KEYRING_SERVICE, &account, &secret)
+        .map_err(|e| format!("keyring set `{account}`: {e}"))
+}
+
+#[tauri::command]
+fn load_secret(app: AppHandle, account: String) -> Result<Option<String>, String> {
+    // `get_password` returns `Result<Option<String>>`: `Ok(None)` for a
+    // missing slot, `Err` for genuine keychain errors. The webview needs
+    // to be able to distinguish "not configured" from "keychain broken"
+    // so we forward both.
+    app.keyring()
+        .get_password(KEYRING_SERVICE, &account)
+        .map_err(|e| format!("keyring get `{account}`: {e}"))
+}
+
+#[tauri::command]
+fn delete_secret(app: AppHandle, account: String) -> Result<(), String> {
+    // Make this idempotent: deleting a missing entry returns
+    // `Err(NoEntry)`, which we swallow. The Settings UI calls
+    // `delete_secret` on "wipe" and the user shouldn't see a scary
+    // error if the key was already gone.
+    match app.keyring().delete_password(KEYRING_SERVICE, &account) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("no entry") || msg.contains("NoSuch") {
+                Ok(())
+            } else {
+                Err(format!("keyring delete `{account}`: {e}"))
+            }
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1300,9 +1374,9 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_keyring::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -1330,17 +1404,21 @@ pub fn run() {
             detect_scaffold,
             scope_sizes,
             execute_scope,
+            execute_plan,
+            find_scope_for_path,
             list_conda_envs,
             advise,
             inspect_path,
             reveal_in_explorer,
-            execute_plan,
             set_advisor,
             volume_info,
             list_steam_games,
             list_steam_workshop_items,
             fetch_workshop_titles,
             open_steam_url,
+            store_secret,
+            load_secret,
+            delete_secret,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

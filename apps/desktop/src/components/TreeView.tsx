@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type MouseEvent } from 'react';
+import clsx from 'clsx';
+import { FixedSizeList, type ListChildComponentProps } from 'react-window';
 import { ChevronRight, ChevronDown, FolderOpen, Copy } from 'lucide-react';
 import type { Node } from '../types';
 import { formatBytes, formatCount } from '../format';
@@ -11,10 +13,71 @@ type Props = {
   onSelect: (p: string) => void;
 };
 
+const ROW_HEIGHT = 22;
+const CHILD_LIMIT = 500;
+
+type NodeRow = {
+  kind: 'node';
+  node: Node;
+  parentSize: number;
+  depth: number;
+};
+type TruncatedRow = {
+  kind: 'truncated';
+  parent: Node;
+  hidden: number;
+  depth: number;
+};
+type VisibleRow = NodeRow | TruncatedRow;
+
 export function TreeView({ root, selectedPath, onSelect }: Props) {
   const [ctx, setCtx] = useState<ContextMenuState | null>(null);
+  const [open, setOpen] = useState<Set<string>>(() => new Set([root.path]));
+  const { ref: bodyRef, size } = useElementSize();
 
-  const openCtx = (e: React.MouseEvent, node: Node) => {
+  // Reset expanded paths whenever a new scan lands — old paths in the set
+  // simply miss on the new tree (no-op) but the explicit reset keeps
+  // memory from carrying paths that may not exist anymore.
+  useEffect(() => {
+    setOpen(new Set([root.path]));
+  }, [root.path]);
+
+  const flatRows = useMemo<VisibleRow[]>(() => {
+    const out: VisibleRow[] = [];
+    const visit = (n: Node, depth: number, parentSize: number) => {
+      if (depth > 0) {
+        out.push({ kind: 'node', node: n, parentSize, depth });
+      }
+      if (n.is_dir && open.has(n.path) && n.children.length > 0) {
+        const kids = n.children;
+        const showCount = Math.min(kids.length, CHILD_LIMIT);
+        for (let i = 0; i < showCount; i++) {
+          visit(kids[i], depth + 1, n.size || 1);
+        }
+        if (kids.length > CHILD_LIMIT) {
+          out.push({
+            kind: 'truncated',
+            parent: n,
+            hidden: kids.length - CHILD_LIMIT,
+            depth: depth + 1,
+          });
+        }
+      }
+    };
+    visit(root, 0, root.size || 1);
+    return out;
+  }, [root, open]);
+
+  const toggle = useCallback((path: string) => {
+    setOpen((s) => {
+      const next = new Set(s);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const openCtx = useCallback((e: MouseEvent, node: Node) => {
     e.preventDefault();
     setCtx({
       x: e.clientX,
@@ -32,7 +95,28 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
         },
       ],
     });
-  };
+  }, []);
+
+  const renderRow = useCallback(
+    ({ index, style }: ListChildComponentProps) => {
+      const row = flatRows[index];
+      if (row.kind === 'truncated') {
+        return <TruncatedRowView row={row} style={style} />;
+      }
+      return (
+        <NodeRowView
+          row={row}
+          style={style}
+          isSelected={row.node.path === selectedPath}
+          isOpen={open.has(row.node.path)}
+          onSelect={onSelect}
+          onToggle={toggle}
+          onCtx={openCtx}
+        />
+      );
+    },
+    [flatRows, selectedPath, open, onSelect, toggle, openCtx],
+  );
 
   return (
     <div className="treeview">
@@ -42,21 +126,94 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
         <div className="col-size">大小</div>
         <div className="col-count">项目</div>
       </div>
-      <div className="tree-body">
-        <Row
-          node={root}
-          parentSize={root.size || 1}
-          depth={0}
-          selectedPath={selectedPath}
-          onSelect={onSelect}
-          onCtx={openCtx}
-          initialOpen
-        />
+      <div className="tree-body" ref={bodyRef}>
+        {size.height > 0 && size.width > 0 && (
+          <FixedSizeList
+            height={size.height}
+            width={size.width}
+            itemCount={flatRows.length}
+            itemSize={ROW_HEIGHT}
+            overscanCount={8}
+          >
+            {renderRow}
+          </FixedSizeList>
+        )}
       </div>
       <ContextMenu state={ctx} onClose={() => setCtx(null)} />
     </div>
   );
 }
+
+type NodeRowViewProps = {
+  row: NodeRow;
+  style: CSSProperties;
+  isSelected: boolean;
+  isOpen: boolean;
+  onSelect: (p: string) => void;
+  onToggle: (p: string) => void;
+  onCtx: (e: MouseEvent, node: Node) => void;
+};
+
+const NodeRowView = memo(function NodeRowView({
+  row, style, isSelected, isOpen, onSelect, onToggle, onCtx,
+}: NodeRowViewProps) {
+  const { node, parentSize, depth } = row;
+  const hasKids = (node.children?.length ?? 0) > 0;
+  const pct = parentSize > 0 ? (node.size / parentSize) * 100 : 0;
+  return (
+    <div
+      className={clsx('tree-row', isSelected && 'selected', !node.is_dir && 'is-file')}
+      style={style}
+      onClick={() => onSelect(node.path)}
+      onContextMenu={(e) => onCtx(e, node)}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('application/x-pinkbin-path', node.path);
+        e.dataTransfer.setData('application/x-pinkbin-name', node.name);
+        e.dataTransfer.effectAllowed = 'copy';
+      }}
+      title={node.path + '  ·  右键查看选项'}
+    >
+      <div className="col-name" style={{ paddingLeft: 4 + depth * 14 }}>
+        <span
+          className="caret"
+          onClick={(e) => { e.stopPropagation(); if (hasKids) onToggle(node.path); }}
+        >
+          {hasKids
+            ? (isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />)
+            : <span className="caret-stub" />}
+        </span>
+        <span className="glyph">
+          {node.is_dir ? <FolderGlyph open={isOpen} /> : <FileGlyph ext={extOf(node.name)} />}
+        </span>
+        <span className="name">{node.name || node.path}</span>
+        {node.scaffold_id && <span className="badge">{node.scaffold_id}</span>}
+      </div>
+      <div className="col-pct">
+        <span className="pct-bar"><span style={{ width: `${Math.min(100, pct)}%` }} /></span>
+        <span className="pct-num">{pct.toFixed(1)}%</span>
+      </div>
+      <div className="col-size">{formatBytes(node.size)}</div>
+      <div className="col-count">{formatCount(node.file_count)}</div>
+    </div>
+  );
+});
+
+type TruncatedRowViewProps = {
+  row: TruncatedRow;
+  style: CSSProperties;
+};
+
+const TruncatedRowView = memo(function TruncatedRowView({ row, style }: TruncatedRowViewProps) {
+  return (
+    <div className="tree-row is-truncated" style={style}>
+      <div className="col-name" style={{ paddingLeft: 4 + row.depth * 14 }}>
+        <span className="caret-stub" />
+        <span className="name">… 还有 {formatCount(row.hidden)} 个未显示（Pinkbin 限制每层 {CHILD_LIMIT} 项）</span>
+      </div>
+    </div>
+  );
+});
 
 function FolderGlyph({ open }: { open: boolean }) {
   // Windows-style yellow folder (closed/open variants).
@@ -103,75 +260,23 @@ function extOf(name: string): string {
   return i > 0 ? name.slice(i + 1).toLowerCase() : '';
 }
 
-function Row({
-  node,
-  parentSize,
-  depth,
-  selectedPath,
-  onSelect,
-  onCtx,
-  initialOpen = false,
-}: {
-  node: Node;
-  parentSize: number;
-  depth: number;
-  selectedPath: string | null;
-  onSelect: (p: string) => void;
-  onCtx: (e: React.MouseEvent, node: Node) => void;
-  initialOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(initialOpen);
-  const hasKids = (node.children?.length ?? 0) > 0;
-  const sel = node.path === selectedPath;
-  const pct = parentSize > 0 ? (node.size / parentSize) * 100 : 0;
-
-  return (
-    <>
-      <div
-        className={'tree-row' + (sel ? ' selected' : '') + (node.is_dir ? '' : ' is-file')}
-        onClick={() => onSelect(node.path)}
-        onContextMenu={(e) => onCtx(e, node)}
-        draggable
-        onDragStart={(e) => {
-          e.dataTransfer.setData('application/x-pinkbin-path', node.path);
-          e.dataTransfer.setData('application/x-pinkbin-name', node.name);
-          e.dataTransfer.effectAllowed = 'copy';
-        }}
-        title={node.path + '  ·  右键查看选项'}
-      >
-        <div className="col-name" style={{ paddingLeft: 4 + depth * 14 }}>
-          <span
-            className="caret"
-            onClick={(e) => { e.stopPropagation(); if (hasKids) setOpen((v) => !v); }}
-          >
-            {hasKids
-              ? (open ? <ChevronDown size={11} /> : <ChevronRight size={11} />)
-              : <span className="caret-stub" />}
-          </span>
-          <span className="glyph">
-            {node.is_dir ? <FolderGlyph open={open} /> : <FileGlyph ext={extOf(node.name)} />}
-          </span>
-          <span className="name">{node.name || node.path}</span>
-          {node.scaffold_id && <span className="badge">{node.scaffold_id}</span>}
-        </div>
-        <div className="col-pct">
-          <span className="pct-bar"><span style={{ width: `${Math.min(100, pct)}%` }} /></span>
-          <span className="pct-num">{pct.toFixed(1)}%</span>
-        </div>
-        <div className="col-size">{formatBytes(node.size)}</div>
-        <div className="col-count">{formatCount(node.file_count)}</div>
-      </div>
-      {open && hasKids && node.children.slice(0, 500).map((c) => (
-        <Row
-          key={c.path}
-          node={c}
-          parentSize={node.size || 1}
-          depth={depth + 1}
-          selectedPath={selectedPath}
-          onSelect={onSelect}
-          onCtx={onCtx}
-        />
-      ))}
-    </>
-  );
+function useElementSize() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const setFromEntry = (entry: ResizeObserverEntry) => {
+      const r = entry.contentRect;
+      setSize({ width: r.width, height: r.height });
+    };
+    setFromEntry({ contentRect: el.getBoundingClientRect() } as ResizeObserverEntry);
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setFromEntry(entry);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return { ref, size };
 }
