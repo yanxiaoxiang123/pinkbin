@@ -21,6 +21,7 @@ export function ChatPanel() {
   const resetChat = useStore((s) => s.resetChat);
   const studioRequest = useStore((s) => s.studioRequest);
   const consumeStudio = useStore((s) => s.consumeStudio);
+  const advisorReady = useStore((s) => s.advisorReady);
 
   // Auto-overview on scan complete
   useOverview();
@@ -99,6 +100,7 @@ export function ChatPanel() {
   return (
     <div
       className={clsx('chat', dropping && 'drop-target')}
+      data-accept-drop="pinkbin-path"
       onDragOver={(e) => { e.preventDefault(); setDropping(true); }}
       onDragLeave={() => setDropping(false)}
       onDrop={onDrop}
@@ -121,7 +123,14 @@ export function ChatPanel() {
       </div>
 
       <div className="chat-scroll" ref={scrollerRef}>
-        {empty && !root && (
+        {empty && !root && !advisorReady && (
+          <div className="chat-hero">
+            <MessageSquare size={32} />
+            <h3>Pinkbin AI</h3>
+            <p>AI 还没配置 — 点右上角 <strong>⚙️ 设置</strong> 填一个 API Key 和模型名，或接本地 Ollama（不用 Key）。</p>
+          </div>
+        )}
+        {empty && !root && advisorReady && (
           <div className="chat-hero">
             <MessageSquare size={32} />
             <h3>Pinkbin AI</h3>
@@ -129,7 +138,7 @@ export function ChatPanel() {
             {!isTauri && <p className="muted">浏览器预览模式：扫描数据是模拟的，但 AI 会走真实接口。</p>}
           </div>
         )}
-        {empty && root && (
+        {empty && root && advisorReady && (
           <div className="chat-hero">
             <Sparkles size={28} />
             <p>AI 正在生成整体解析…</p>
@@ -210,7 +219,7 @@ export function ChatPanel() {
           </button>
           <textarea
             rows={2}
-            placeholder={root ? '问 AI：这是什么？能删吗？把文件 / 图片拖进来…（图片粘贴也行）' : '先选一个磁盘开始扫描，或贴张图片直接问'}
+            placeholder={root ? '问 AI：这是什么？能删吗？把文件 / 图片拖进来…（图片粘贴也行）' : advisorReady ? '先选一个磁盘开始扫描，或贴张图片直接问' : '先去右上角 ⚙️ 设置配 AI'}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
@@ -225,10 +234,12 @@ export function ChatPanel() {
           <button
             className="primary"
             onClick={() => askFollowUp(input, pendingDrops, pendingImages)}
+            title={advisorReady ? undefined : '先去设置里配 AI'}
             disabled={
               (!input.trim() && pendingDrops.length === 0 && pendingImages.length === 0) ||
               chatBusy ||
-              (!root && pendingImages.length === 0)
+              (!root && pendingImages.length === 0) ||
+              !advisorReady
             }
           >
             <Send size={14} /> 发送

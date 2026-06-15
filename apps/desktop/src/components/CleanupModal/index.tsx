@@ -2,7 +2,7 @@
 // the two-step arm → dry-run → real-delete flow. Sub-components live next
 // to this file in the same folder; the scope-sizes fetch is in `hooks`.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import FocusTrap from 'focus-trap-react';
 import { X, Trash2, Loader2, AlertTriangle } from 'lucide-react';
@@ -92,8 +92,25 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
   const [armed, setArmed] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+
+  // Cancel an in-flight deletion when the modal closes or unmounts.
+  const cancelJob = useCallback(() => {
+    if (jobIdRef.current) {
+      api.cancelJob(jobIdRef.current).catch(() => {});
+      jobIdRef.current = null;
+    }
+  }, []);
+
+  const handleClose = useCallback(() => {
+    cancelJob();
+    onClose();
+  }, [cancelJob, onClose]);
 
   const matchKey = matches.map((m) => m.path).sort().join('|');
+
+  // Cancel in-flight deletion on unmount.
+  useEffect(() => cancelJob, [cancelJob]);
 
   // Load conda envs.
   useEffect(() => {
@@ -272,12 +289,17 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
   };
 
   const cancelPreview = () => {
+    cancelJob();
     setPreview(null);
     setArmed(false);
   };
 
   const runRealDelete = async () => {
     if (preview === null) return;
+    // Generate a unique job ID that ties all concurrent executeScope calls
+    // together — cancel_job with this ID stops every in-flight call at once.
+    const jobId = crypto.randomUUID();
+    jobIdRef.current = jobId;
     setRunning(true);
     setMsg(null);
     setErr(null);
@@ -288,7 +310,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
         const envFilterArg = [...selectedEnvs];
         const entries = await api.executeScope(
           sc.id, 'envs-stale', matches[0].path, false,
-          undefined, undefined, envFilterArg,
+          undefined, undefined, envFilterArg, jobId,
         );
         totalEntries = entries.length;
         const refreshed = await api.listCondaEnvs(matches[0].path).catch(() => [] as CondaEnv[]);
@@ -300,7 +322,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
           const days = daysByScope[scopeId];
           for (const m of matches) {
             tasks.push(
-              api.executeScope(sc.id, scopeId, m.path, false, days, wxidFilterArg).then(
+              api.executeScope(sc.id, scopeId, m.path, false, days, wxidFilterArg, undefined, jobId).then(
                 (entries) => { totalEntries += entries.length; },
                 (e) => { console.warn(`[pinkbin] executeScope ${sc.id}/${scopeId} on ${m.path} failed:`, e); },
               ),
@@ -319,6 +341,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
       setErr(`清理失败：${String(e)}`);
       throw e;
     } finally {
+      jobIdRef.current = null;
       setRunning(false);
     }
   };
@@ -343,7 +366,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
   }, [isConda, matches, scopeSizes]);
 
   return (
-    <div className="modal-bg" onClick={onClose}>
+    <div className="modal-bg" onClick={handleClose}>
       <FocusTrap focusTrapOptions={{ escapeDeactivates: false, allowOutsideClick: true }}>
         <div
           className="modal cleanup-modal"
@@ -357,7 +380,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
             清理 · {sc.name}
             {scopeLoading && <Loader2 size={13} className="spin" style={{ marginLeft: 8, verticalAlign: 'middle' }} />}
           </div>
-          <button className="ghost icon" onClick={onClose} aria-label="关闭"><X size={16} /></button>
+          <button className="ghost icon" onClick={handleClose} aria-label="关闭"><X size={16} /></button>
         </div>
 
         <div className="cleanup-paths">
@@ -457,7 +480,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
               : <span className="muted">勾选要清理的项目</span>}
           </div>
           <div className="cleanup-actions">
-            <button className="ghost" onClick={onClose} disabled={running}>取消</button>
+            <button className="ghost" onClick={handleClose}>取消</button>
             <button
               className={clsx('primary cleanup-execute', armed && 'armed')}
               onClick={execute}

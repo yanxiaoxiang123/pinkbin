@@ -3,6 +3,7 @@ import FocusTrap from 'focus-trap-react';
 import { X, CheckCircle2, Info, Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { isTauri } from '../env';
+import { useStore } from '../store';
 import {
   loadSettings,
   saveSettings,
@@ -14,23 +15,24 @@ import {
 
 type Props = { onClose: () => void };
 
-// Detect which on-the-wire protocol to use from the Base URL alone, so the
-// user doesn't have to think about "协议". Heuristics cover the cases users
-// actually run into; everything else falls through to OpenAI (the de-facto
-// universal standard for relays + national providers).
-function detectProvider(baseUrl: string): Provider {
+// Suggest a provider from the URL heuristics, but never mandate it — the
+// user picks explicitly via radio buttons. The hint text nudges: "我们猜
+// 你是 X，错了点 Y". Falls through to `null` when nothing matches.
+function suggestProvider(baseUrl: string): Provider | null {
   const u = baseUrl.toLowerCase();
-  if (!u) return 'openai';
+  if (!u) return null;
   if (u.includes('11434') || u.includes('localhost') || u.includes('127.0.0.1') || u.includes('/api/chat')) return 'ollama';
-  // 识别带 anthropic 字样的代理子域名（如 anthropic.novadiffusion.com），
-  // 不仅是官方 anthropic.com。误识别风险极小——OpenAI 协议代理几乎不会
-  // 把 anthropic 写进域名里。
   if (u.includes('anthropic') || u.includes('/v1/messages')) return 'anthropic';
   if (u.includes('googleapis.com') || u.includes('generativelanguage')) return 'gemini';
-  return 'openai';
+  // Pure OpenAI URL → explicitly show it; ambiguous/non-matching → null
+  // so the user must pick (don't silently default to openai).
+  if (u.includes('openai.com')) return 'openai';
+  return null;
 }
 
 export function Settings({ onClose }: Props) {
+  const [loaded, setLoaded] = useState(false);
+  const [provider, setProvider] = useState<Provider>('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('');
@@ -42,20 +44,22 @@ export function Settings({ onClose }: Props) {
   useEffect(() => {
     const existing = loadSettings();
     if (existing) {
+      setProvider(existing.provider);
       setModel(existing.model);
       setBaseUrl(existing.baseUrl);
       setSaved(true);
     }
-    // The key is not in localStorage — it lives in the OS credential
-    // manager. We pull it on mount so the input field is pre-filled
-    // (so the user can verify or edit), but never write it back to disk
-    // in plaintext.
+    // Mark loaded only after both sync settings and the async keychain
+    // read complete, so the form never renders '' → user types → async
+    // overwrites. loadSettings() is always sync; the keychain read is
+    // the only async leg — mark loaded when it settles (success or not).
     api.loadSecret(ADVISOR_KEY_ACCOUNT)
       .then((k) => { if (k) setApiKey(k); })
-      .catch(() => { /* empty slot or keychain unavailable — leave field blank */ });
+      .catch(() => { /* empty slot or keychain unavailable */ })
+      .finally(() => setLoaded(true));
   }, []);
 
-  const provider = detectProvider(baseUrl);
+  const suggested = suggestProvider(baseUrl);
   const needsKey = provider !== 'ollama';
 
   const save = async () => {
@@ -80,6 +84,7 @@ export function Settings({ onClose }: Props) {
       }
       setMsg('已保存 · key 只存在你本机系统钥匙串 (Credential Manager / Keychain / libsecret)');
       setSaved(true);
+      useStore.getState().setAdvisorReady(true);
     } catch (e) {
       setErr(String(e));
     }
@@ -91,11 +96,13 @@ export function Settings({ onClose }: Props) {
     } catch { /* idempotent */ }
     invalidateApiKey();
     clearSettings();
+    setProvider('openai');
     setApiKey('');
     setBaseUrl('');
     setModel('');
     setSaved(false);
     setMsg('已清除本地保存的配置和钥匙串里的 key');
+    useStore.getState().setAdvisorReady(false);
   };
 
   return (
@@ -113,17 +120,46 @@ export function Settings({ onClose }: Props) {
           <button className="ghost icon" onClick={onClose}><X size={16} /></button>
         </div>
 
-        <p className="hint">
+        {!loaded ? (
+          <div className="settings-skeleton">
+            <div className="skeleton-line" style={{ width: '70%' }} />
+            <div className="skeleton-field" />
+            <div className="skeleton-field" />
+            <div className="skeleton-field" />
+          </div>
+        ) : (
+          <><p className="hint">
           <Info size={12} />
-          <span>填你服务商给你的 Base URL、API Key 和模型名。OpenAI、DeepSeek、Kimi、各种中转都直接填就能用；本地 Ollama 不用 Key。</span>
+          <span>填你服务商给你的 Base URL、API Key 和模型名。先选协议再填地址，省得猜错。</span>
         </p>
-
+        <label className="field">
+          <span>协议 · Provider</span>
+          <div className="provider-radio-group">
+            {(['openai', 'anthropic', 'gemini', 'ollama'] as const).map((p) => (
+              <label key={p} className="provider-radio">
+                <input
+                  type="radio"
+                  name="provider"
+                  value={p}
+                  checked={provider === p}
+                  onChange={() => setProvider(p)}
+                  disabled={!loaded}
+                />
+                <span>{p === 'openai' ? 'OpenAI' : p === 'anthropic' ? 'Anthropic' : p === 'gemini' ? 'Gemini' : 'Ollama（本地）'}</span>
+              </label>
+            ))}
+          </div>
+          {suggested && suggested !== provider && (
+            <p className="provider-hint">我们猜你是 <strong>{suggested}</strong> — 如果不对，点上面切换。</p>
+          )}
+        </label>
         <label className="field">
           <span>Base URL</span>
           <input
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
             placeholder="https://api.openai.com/v1"
+            disabled={!loaded}
           />
         </label>
 
@@ -137,6 +173,7 @@ export function Settings({ onClose }: Props) {
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="sk-..."
                 style={{ flex: 1 }}
+                disabled={!loaded}
               />
               <button
                 type="button"
@@ -156,6 +193,7 @@ export function Settings({ onClose }: Props) {
             value={model}
             onChange={(e) => setModel(e.target.value)}
             placeholder="gpt-4o-mini · deepseek-chat · claude-haiku-4-5 …"
+            disabled={!loaded}
           />
         </label>
 
@@ -170,7 +208,8 @@ export function Settings({ onClose }: Props) {
 
         <p className="muted small" style={{ marginTop: 4 }}>
           Pinkbin 只把目录元数据发给 AI（路径、大小、文件数、扩展名分布、抽样路径），<strong>不会</strong>读取或上传文件内容。
-        </p>
+        </p></>
+        )}
         </div>
       </FocusTrap>
     </div>

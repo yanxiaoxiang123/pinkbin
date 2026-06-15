@@ -3,9 +3,10 @@ import { useEffect, useRef } from 'react';
 type Props = {
   onDrag: (deltaPx: number) => void;
   onDoubleClick?: () => void;
+  ariaValueNow?: number;
 };
 
-export function Splitter({ onDrag, onDoubleClick }: Props) {
+export function Splitter({ onDrag, onDoubleClick, ariaValueNow }: Props) {
   const startX = useRef(0);
   const dragging = useRef(false);
 
@@ -33,6 +34,10 @@ export function Splitter({ onDrag, onDoubleClick }: Props) {
   return (
     <div
       className="splitter"
+      role="separator"
+      aria-orientation="vertical"
+      aria-valuenow={ariaValueNow}
+      tabIndex={0}
       onMouseDown={(e) => {
         dragging.current = true;
         startX.current = e.clientX;
@@ -40,7 +45,16 @@ export function Splitter({ onDrag, onDoubleClick }: Props) {
         document.body.style.userSelect = 'none';
       }}
       onDoubleClick={onDoubleClick}
-      title="拖动调整 · 双击重置"
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          onDrag(e.shiftKey ? -50 : -10);
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          onDrag(e.shiftKey ? 50 : 10);
+        }
+      }}
+      title="拖动调整 · 双击重置 · 键盘 ← →"
     >
       <span />
     </div>

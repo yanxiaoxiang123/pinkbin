@@ -27,8 +27,8 @@ const tauri = {
   detectScaffold: (path: string) => invoke<string | null>('detect_scaffold', { path }),
   scopeSizes: (scaffoldId: string, rootPath: string, scopeDays?: Record<string, number>, wxidFilter?: string[], envFilter?: string[]) =>
     invoke<ScopeSizeRow[]>('scope_sizes', { scaffoldId, rootPath, scopeDays: scopeDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
-  executeScope: (scaffoldId: string, scopeId: string, rootPath: string, dryRun: boolean, olderThanDays?: number, wxidFilter?: string[], envFilter?: string[]) =>
-    invoke<UndoEntry[]>('execute_scope', { scaffoldId, scopeId, rootPath, dryRun, olderThanDays: olderThanDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
+  executeScope: (scaffoldId: string, scopeId: string, rootPath: string, dryRun: boolean, olderThanDays?: number, wxidFilter?: string[], envFilter?: string[], jobId?: string) =>
+    invoke<UndoEntry[]>('execute_scope', { scaffoldId, scopeId, rootPath, dryRun, olderThanDays: olderThanDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null, jobId: jobId ?? null }),
   listCondaEnvs: (condaRoot: string) => invoke<CondaEnv[]>('list_conda_envs', { condaRoot }),
   advise: (req: AdvisorRequest) => invoke<AdvisorResponse>('advise', { req }),
   inspect: (path: string, sampleCount: number) => invoke<string[]>('inspect_path', { path, sampleCount }),
@@ -44,6 +44,7 @@ const tauri = {
   // the chat panel to discover the right scaffold+scope to pass to execute.
   findScopeForPath: (path: string) =>
     invoke<ScopeMatch[]>('find_scope_for_path', { path }),
+  cancelJob: (jobId: string) => invoke<void>('cancel_job', { jobId }),
   // Tauri return is `VolumeInfo` but the browser fallback returns null when
   // the path doesn't exist on a volume, so the union lives on the canonical
   // type and the tauri side declares it honestly.
@@ -107,6 +108,7 @@ const browser = {
   listSteamWorkshopItems: (_libraryRoot: string, appid: number) => Promise.resolve(mocks.steamWorkshopItems(appid)),
   fetchWorkshopTitles: (ids: number[]) => Promise.resolve(mocks.workshopTitles(ids)),
   openSteamUrl: () => Promise.resolve(),
+  cancelJob: (_jobId: string) => Promise.resolve(),
 };
 
 type Api = typeof tauri;

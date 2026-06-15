@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use include_dir::{include_dir, Dir};
 use pinkbin_advisor::{
     advise as advise_provider, AdvisorRequest, AdvisorResponse, Provider, SecretString,
 };
-use pinkbin_executor::{execute, Plan, UndoEntry};
+use pinkbin_executor::{Plan, UndoEntry};
 use pinkbin_scaffold::{
     compile_all, detect_compiled, detect_for, expand_env, load_dir, parse_toml, CompiledScaffold,
     RecycleGranularity, Scaffold,
@@ -45,6 +46,9 @@ struct AppState {
     advisor: Mutex<Option<Provider>>,
     quarantine_root: PathBuf,
     undo_log: PathBuf,
+    /// Map of active job_id → cancel flag. Set to `true` to request
+    /// early termination of a running `execute_scope` / `execute_plan`.
+    jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 #[tauri::command]
@@ -522,6 +526,7 @@ async fn execute_scope(
     older_than_days: Option<u32>,
     wxid_filter: Option<Vec<String>>,
     env_filter: Option<Vec<String>>,
+    job_id: Option<String>,
 ) -> Result<Vec<UndoEntry>, String> {
     let (scaffold, scope) = {
         let scaffolds = state.scaffolds.lock().unwrap();
@@ -585,8 +590,26 @@ async fn execute_scope(
     };
     let undo_log = state.undo_log.clone();
     let quarantine_root = state.quarantine_root.clone();
+
+    // Register the cancel flag before spawning so `cancel_job` can find it.
+    let cancel_flag: Option<Arc<AtomicBool>> = job_id.as_ref().map(|jid| {
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .entry(jid.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    });
+
     tokio::task::spawn_blocking(move || {
-        pinkbin_executor::execute(&plan, dry_run, &undo_log, &quarantine_root)
+        pinkbin_executor::execute_with_cancel(
+            &plan,
+            dry_run,
+            &undo_log,
+            &quarantine_root,
+            cancel_flag.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -799,6 +822,7 @@ async fn execute_plan(
     paths: Vec<String>,
     reason: String,
     dry_run: bool,
+    job_id: Option<String>,
 ) -> Result<Vec<UndoEntry>, String> {
     let (scaffold, scope) = {
         let scaffolds = state.scaffolds.lock().unwrap();
@@ -859,12 +883,41 @@ async fn execute_plan(
     };
     let undo_log = state.undo_log.clone();
     let quarantine_root = state.quarantine_root.clone();
+
+    let cancel_flag: Option<Arc<AtomicBool>> = job_id.as_ref().map(|jid| {
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .entry(jid.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    });
+
     tokio::task::spawn_blocking(move || {
-        pinkbin_executor::execute(&plan, dry_run, &undo_log, &quarantine_root)
+        pinkbin_executor::execute_with_cancel(
+            &plan,
+            dry_run,
+            &undo_log,
+            &quarantine_root,
+            cancel_flag.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
+}
+
+/// Set the cancel flag for a running job identified by `job_id`. The
+/// executor checks this flag between path iterations and stops early when
+/// it sees `true`. Idempotent — cancelling a missing or already-completed
+/// job is a no-op.
+#[tauri::command]
+fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    if let Some(flag) = state.jobs.lock().unwrap().get(&job_id).cloned() {
+        flag.store(true, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 /// Return every (scaffold_id, scope_id) whose compiled glob matches `path`.
@@ -1394,6 +1447,7 @@ pub fn run() {
                 advisor: Mutex::new(None),
                 quarantine_root,
                 undo_log,
+                jobs: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
@@ -1405,6 +1459,7 @@ pub fn run() {
             scope_sizes,
             execute_scope,
             execute_plan,
+            cancel_job,
             find_scope_for_path,
             list_conda_envs,
             advise,

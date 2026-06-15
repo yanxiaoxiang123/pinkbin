@@ -13,6 +13,12 @@ type Props = {
   onSelect: (p: string) => void;
 };
 
+// Check if `el` or any ancestor has `[data-accept-drop]`.
+function isAcceptDropTarget(el: EventTarget | null): boolean {
+  let node = (el as HTMLElement | null)?.closest('[data-accept-drop]');
+  return node !== null;
+}
+
 const ROW_HEIGHT = 22;
 const CHILD_LIMIT = 500;
 
@@ -41,6 +47,39 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
   useEffect(() => {
     setOpen(new Set([root.path]));
   }, [root.path]);
+
+  // Global drop-target guard: when dragging a TreeView row over an element
+  // that does NOT have `[data-accept-drop]` (e.g. Studio, TreeView itself),
+  // add `drop-target-forbidden` to body so users see a "not-allowed" cursor
+  // instead of thinking the drop will work.
+  useEffect(() => {
+    const onDragEnterOver = (e: DragEvent) => {
+      document.body.classList.toggle('drop-target-forbidden', !isAcceptDropTarget(e.target));
+    };
+    const onDragEnd = () => {
+      document.body.classList.remove('drop-target-forbidden');
+    };
+    // Only activate guard when a TreeView row starts being dragged.
+    const onDragStart = (e: DragEvent) => {
+      const tree = (e.target as HTMLElement)?.closest('.treeview');
+      if (!tree) return; // not from TreeView
+      document.addEventListener('dragenter', onDragEnterOver);
+      document.addEventListener('dragover', onDragEnterOver);
+      document.addEventListener('dragleave', onDragEnd);  // reset on leave
+      document.addEventListener('drop', onDragEnd);
+      document.addEventListener('dragend', onDragEnd, { once: true });
+    };
+    document.addEventListener('dragstart', onDragStart);
+    return () => {
+      document.removeEventListener('dragstart', onDragStart);
+      document.removeEventListener('dragenter', onDragEnterOver);
+      document.removeEventListener('dragover', onDragEnterOver);
+      document.removeEventListener('dragleave', onDragEnd);
+      document.removeEventListener('drop', onDragEnd);
+      document.removeEventListener('dragend', onDragEnd);
+      document.body.classList.remove('drop-target-forbidden');
+    };
+  }, []);
 
   const flatRows = useMemo<VisibleRow[]>(() => {
     const out: VisibleRow[] = [];

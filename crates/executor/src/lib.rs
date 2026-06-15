@@ -7,6 +7,18 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Breaks out of the current path loop when `cancel` evaluates to `true`.
+macro_rules! check_cancel {
+    ($cancel:expr) => {
+        if let Some(c) = $cancel {
+            if c.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+    };
+}
 
 // ── File attributes (probe result) ─────────────────────────────────────────
 
@@ -262,11 +274,27 @@ pub fn execute(
     undo_log: &Path,
     quarantine_root: &Path,
 ) -> anyhow::Result<Vec<UndoEntry>> {
+    execute_with_cancel(plan, dry_run, undo_log, quarantine_root, None)
+}
+
+/// Like `execute`, but accepts an optional `AtomicBool` cancel flag.
+/// Each path loop checks the flag on every iteration; when `true`, the
+/// loop breaks early and returns whatever entries have been processed so
+/// far. Every processed entry is independently logged (via atomic
+/// append), so partial results are consistent.
+pub fn execute_with_cancel(
+    plan: &Plan,
+    dry_run: bool,
+    undo_log: &Path,
+    quarantine_root: &Path,
+    cancel: Option<&AtomicBool>,
+) -> anyhow::Result<Vec<UndoEntry>> {
     let mut out: Vec<UndoEntry> = Vec::new();
     let now = || chrono::Utc::now().to_rfc3339();
 
     if dry_run {
         for p in &plan.paths {
+            check_cancel!(cancel);
             out.push(UndoEntry {
                 timestamp: now(),
                 action: plan.action,
@@ -294,6 +322,7 @@ pub fn execute(
             // then propagate that tombstone to the cloud, turning a local
             // recycle into a permanent cross-device data loss.
             for src in &plan.paths {
+                check_cancel!(cancel);
                 let attrs = probe(src);
                 if attrs.is_missing {
                     tracing::warn!("recycle: path not found, skipping {:?}", src);
@@ -323,6 +352,7 @@ pub fn execute(
         Action::Quarantine => {
             std::fs::create_dir_all(quarantine_root)?;
             for src in &plan.paths {
+                check_cancel!(cancel);
                 let attrs = probe(src);
                 if attrs.is_missing {
                     tracing::warn!("quarantine: path not found, skipping {:?}", src);
@@ -370,6 +400,7 @@ pub fn execute(
         }
         Action::Delete => {
             for p in &plan.paths {
+                check_cancel!(cancel);
                 let attrs = probe(p);
                 if attrs.is_missing {
                     tracing::warn!("delete: path not found, skipping {:?}", p);

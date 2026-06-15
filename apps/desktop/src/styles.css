@@ -209,6 +209,7 @@ aside.left, aside.right { background: var(--paper-2); overflow: auto; min-width:
 aside.right { background: var(--paper); }
 .splitter { position: relative; width: 4px; background: var(--ink); cursor: col-resize; flex-shrink: 0; transition: background .12s; }
 .splitter:hover, .splitter:active { background: var(--pink-deep); }
+.splitter:focus-visible { outline: 2px solid var(--pink-deep); outline-offset: -2px; }
 .splitter > span { position: absolute; inset: 0 -4px; }
 section.center { overflow: hidden; background: var(--paper); display: flex; flex-direction: column; }
 aside::-webkit-scrollbar { width: 12px; }
@@ -339,3 +340,41 @@ footer { display: flex; justify-content: space-between; align-items: center; pad
 }
 
 ::selection { background: var(--pink); color: var(--ink); }
+
+/* ── Skeleton loading ──────────────────────────────────────────────── */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1; }
+}
+.settings-skeleton {
+  display: flex; flex-direction: column; gap: 16px; padding: 12px 0;
+}
+.skeleton-line,
+.skeleton-field {
+  height: 14px; border-radius: 6px;
+  background: var(--ink-3); animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.skeleton-field { height: 36px; }
+
+/* ── Provider radio group (Settings) ───────────────────────────────── */
+.provider-radio-group {
+  display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px;
+}
+.provider-radio {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 10px; border: 2px solid var(--ink-3); border-radius: 8px;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.provider-radio:has(input:checked) {
+  border-color: var(--pink-deep); background: var(--pink-bg);
+}
+.provider-radio input { accent-color: var(--pink-deep); }
+.provider-hint {
+  font-size: 11px; color: var(--ink-3); margin-top: 2px;
+}
+.provider-hint strong { color: var(--ink); }
+
+/* ── Drop-target guard (TreeView → non-accepting areas) ────────────── */
+.drop-target-forbidden,
+.drop-target-forbidden * { cursor: not-allowed !important; }

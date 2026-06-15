@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Node, Scaffold, AdvisorResponse } from './types';
 import { getJson, setJson } from './persist';
+import { loadSettings } from './advisorClient';
 
 export interface ChatTurn {
   id: string;
@@ -64,6 +65,11 @@ interface AppState {
   // in this set render expanded. Survives app restarts.
   studioExpanded: string[];
   toggleStudioExpanded: (scaffoldId: string) => void;
+  // Sync guard: true when `loadSettings()` returns non-null (user has
+  // been through Settings at least once). ChatPanel uses this to disable
+  // Send and show a CTA until the user configures an AI provider.
+  advisorReady: boolean;
+  setAdvisorReady: (b: boolean) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -80,6 +86,10 @@ export const useStore = create<AppState>((set, get) => ({
   toasts: [],
   scanInProgress: false,
   studioExpanded: getJson<string[]>('studioExpanded', []),
+  advisorReady: (() => {
+    const s = loadSettings();
+    return s !== null && s.model?.trim().length > 0;
+  })(),
 
   setRoot: (root) => set({ root }),
   setScaffolds: (scaffolds) => set({ scaffolds }),
@@ -125,4 +135,5 @@ export const useStore = create<AppState>((set, get) => ({
     set({ studioExpanded: next });
   },
   setScanInProgress: (scanInProgress) => set({ scanInProgress }),
+  setAdvisorReady: (advisorReady) => set({ advisorReady }),
 }));
