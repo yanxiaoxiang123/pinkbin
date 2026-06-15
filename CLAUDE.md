@@ -61,8 +61,10 @@ cargo test -p pinkbin-scaffold
 pnpm tauri dev
 # 类型检查
 pnpm -C apps/desktop exec tsc --noEmit
-# 前端构建
-pnpm -C apps/desktop exec vite build
+# 前端构建（含 tsc -b + vite build）
+pnpm build
+# 前端测试
+pnpm -C apps/desktop test
 ```
 
 ## 风格

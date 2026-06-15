@@ -1,0 +1,18 @@
+# lefthook.yml — git hooks for pinkbin
+# Install: npx lefthook install
+
+pre-commit:
+  parallel: true
+  commands:
+    rustfmt:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+    clippy:
+      glob: "*.rs"
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    tsc:
+      glob: "*.{ts,tsx}"
+      run: pnpm -C apps/desktop exec tsc --noEmit
+    eslint:
+      glob: "*.{ts,tsx}"
+      run: pnpm -C apps/desktop lint
