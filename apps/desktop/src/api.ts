@@ -45,6 +45,7 @@ const tauri = {
   findScopeForPath: (path: string) =>
     invoke<ScopeMatch[]>('find_scope_for_path', { path }),
   cancelJob: (jobId: string) => invoke<void>('cancel_job', { jobId }),
+  pruneQuarantine: (ttlDays: number) => invoke<{ removed_count: number; removed_bytes: number }>('prune_quarantine_cmd', { ttlDays }),
   // Tauri return is `VolumeInfo` but the browser fallback returns null when
   // the path doesn't exist on a volume, so the union lives on the canonical
   // type and the tauri side declares it honestly.
@@ -67,6 +68,8 @@ const tauri = {
     invoke<WorkshopItem[]>('list_steam_workshop_items', { libraryRoot, appid }),
   fetchWorkshopTitles: (ids: number[]) => invoke<Record<number, string>>('fetch_workshop_titles', { ids }),
   openSteamUrl: (action: SteamUrlAction, appid: number) => invoke<void>('open_steam_url', { action, appid }),
+  lastUndoEntry: () => invoke<UndoEntry | null>('last_undo_entry'),
+  openRecycleBin: () => invoke<void>('open_recycle_bin'),
 };
 
 // Browser-mode secret store: a module-scoped Map, in-memory only. The
@@ -109,6 +112,9 @@ const browser = {
   fetchWorkshopTitles: (ids: number[]) => Promise.resolve(mocks.workshopTitles(ids)),
   openSteamUrl: () => Promise.resolve(),
   cancelJob: (_jobId: string) => Promise.resolve(),
+  pruneQuarantine: (_ttlDays: number) => Promise.resolve({ removed_count: 0, removed_bytes: 0 }),
+  lastUndoEntry: () => Promise.resolve(null),
+  openRecycleBin: () => Promise.resolve(),
 };
 
 type Api = typeof tauri;

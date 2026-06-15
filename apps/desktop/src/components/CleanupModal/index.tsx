@@ -90,9 +90,16 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<DryRunPreview | null>(null);
   const [armed, setArmed] = useState(false);
+  const [armedSeconds, setArmedSeconds] = useState(0);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const jobIdRef = useRef<string | null>(null);
+  const armIntervalRef = useRef<number | null>(null);
+
+  // Clear arm countdown on unmount.
+  useEffect(() => () => {
+    if (armIntervalRef.current !== null) window.clearInterval(armIntervalRef.current);
+  }, []);
 
   // Cancel an in-flight deletion when the modal closes or unmounts.
   const cancelJob = useCallback(() => {
@@ -199,11 +206,28 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
     if (running) return;
     if (!armed) {
       setArmed(true);
+      setArmedSeconds(5);
       setMsg(null);
-      window.setTimeout(() => setArmed(false), 5000);
+      if (armIntervalRef.current !== null) window.clearInterval(armIntervalRef.current);
+      armIntervalRef.current = window.setInterval(() => {
+        setArmedSeconds((s) => {
+          if (s <= 1) {
+            window.clearInterval(armIntervalRef.current!);
+            armIntervalRef.current = null;
+            setArmed(false);
+            return 0;
+          }
+          return s - 1;
+        });
+      }, 1000);
       return;
     }
+    if (armIntervalRef.current !== null) {
+      window.clearInterval(armIntervalRef.current);
+      armIntervalRef.current = null;
+    }
     setArmed(false);
+    setArmedSeconds(0);
     if (preview === null) {
       // Two-step: first click after arming runs dry-run + opens preview
       // dialog. The user must explicitly confirm IN the dialog to actually
@@ -292,6 +316,11 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
     cancelJob();
     setPreview(null);
     setArmed(false);
+    setArmedSeconds(0);
+    if (armIntervalRef.current !== null) {
+      window.clearInterval(armIntervalRef.current);
+      armIntervalRef.current = null;
+    }
   };
 
   const runRealDelete = async () => {
@@ -485,14 +514,15 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
               className={clsx('primary cleanup-execute', armed && 'armed')}
               onClick={execute}
               disabled={!canExecute}
-              title={armed ? '5 秒内再点一次预览' : '点一次确认，再点一次预览实际会删的文件'}
+              aria-pressed={armed || undefined}
+              title={armed ? `${armedSeconds} 秒内再点一次预览` : '点一次确认，再点一次预览实际会删的文件'}
             >
               {previewing
                 ? <><Loader2 size={13} className="spin" /> 预览中…</>
                 : running
                   ? <><Loader2 size={13} className="spin" /> 清理中…</>
                   : armed
-                    ? <><Trash2 size={13} /> 再点预览</>
+                    ? <><AlertTriangle size={13} /> ⚠ 再点一次开预览 ({armedSeconds}s)</>
                     : <><Trash2 size={13} /> 预览将清理的文件</>}
             </button>
           </div>

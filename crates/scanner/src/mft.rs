@@ -92,7 +92,10 @@ where
     );
 
     // Pass 1: collect all entries by FRN.
-    let mut entries: HashMap<u64, Entry> = HashMap::with_capacity(total_records as usize);
+    // Cap pre-allocation to avoid OOM on huge/corrupt NTFS volumes (4TB+).
+    // The HashMap will grow as needed; 1M is a reasonable starting point.
+    let cap = (total_records as usize).min(1_000_000);
+    let mut entries: HashMap<u64, Entry> = HashMap::with_capacity(cap);
     let mut bytes_total: u64 = 0;
 
     for record_num in 0..total_records {
@@ -185,14 +188,20 @@ where
     let root_frn = KnownNtfsFileRecordNumber::RootDirectory as u64;
     let volume_root = format!("{}:\\", volume_letter.to_ascii_uppercase());
 
-    // Compute roll-up sizes once via DFS.
+    // Compute roll-up sizes once via DFS with depth bound to prevent stack
+    // overflow from junction/symlink cycles that MFT doesn't filter.
     fn rollup(
         frn: u64,
         entries: &HashMap<u64, Entry>,
         sizes: &mut HashMap<u64, (u64, u64)>,
+        depth: u32,
     ) -> (u64, u64) {
         if let Some(c) = sizes.get(&frn) {
             return *c;
+        }
+        if depth > 1024 {
+            tracing::warn!("MFT rollup: depth limit reached at FRN {frn}, possible cycle");
+            return (0, 0);
         }
         // Cycle guard.
         sizes.insert(frn, (0, 0));
@@ -214,7 +223,7 @@ where
                             continue;
                         }
                     }
-                    let (b, n) = rollup(c, entries, sizes);
+                    let (b, n) = rollup(c, entries, sizes, depth + 1);
                     total_bytes = total_bytes.saturating_add(b);
                     total_files = total_files.saturating_add(n);
                 }
@@ -225,11 +234,12 @@ where
     }
 
     let mut sizes: HashMap<u64, (u64, u64)> = HashMap::new();
-    rollup(root_frn, &entries, &mut sizes);
+    rollup(root_frn, &entries, &mut sizes, 0);
 
     // Build the visible Node tree, optionally rooted at `subroot`.
     let start_frn = if let Some(sub) = subroot {
-        find_frn_for_path(sub, root_frn, &entries).unwrap_or(root_frn)
+        find_frn_for_path(sub, root_frn, &entries)
+            .ok_or_else(|| anyhow!("subroot not found in MFT: {}", sub.display()))?
     } else {
         root_frn
     };
@@ -332,14 +342,9 @@ fn build_node(
             children_nodes.push(cnode);
         }
 
-        // Merge child directory extensions so top_extensions is consistent with
-        // walkdir mode (accumulated from all descendants).
-        for child in &children_nodes {
-            for ext in &child.top_extensions {
-                *ext_bytes.entry(ext.ext.clone()).or_insert(0) += ext.bytes;
-                *ext_count.entry(ext.ext.clone()).or_insert(0) += ext.count;
-            }
-        }
+        // #20: Do NOT merge child.top_extensions into parent — that's O(N²)
+        // on deep trees. Each node only reports its immediate children's
+        // extensions, matching walkdir's per-directory semantics.
     }
 
     let mut top_extensions: Vec<ExtShare> = ext_bytes

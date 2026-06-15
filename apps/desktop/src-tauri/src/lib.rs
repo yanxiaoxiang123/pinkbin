@@ -68,7 +68,19 @@ async fn scan_path(
     let compiled = compile_all(&state.scaffolds.lock().unwrap().clone());
 
     let result = tokio::task::spawn_blocking(move || {
+        let last_progress_emit = std::sync::atomic::AtomicU64::new(0);
         let scan_result = scan_with_stats(p, ScanOptions::default(), |progress| {
+            // Throttle progress events to ~50ms to avoid saturating the
+            // frontend's React main thread with thousands of IPC calls/sec.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let last = last_progress_emit.load(std::sync::atomic::Ordering::Relaxed);
+            if now_ms.saturating_sub(last) < 50 {
+                return;
+            }
+            last_progress_emit.store(now_ms, std::sync::atomic::Ordering::Relaxed);
             let _ = app_for_progress.emit(
                 "scan-progress",
                 ScanProgressEvent {
@@ -160,6 +172,7 @@ struct ScanStatsEvent {
     mft_attempted: bool,
     mft_succeeded: bool,
     mft_ms: u64,
+    mft_failure_reason: Option<String>,
     walk_ms: u64,
     build_tree_ms: u64,
     /// Time inside `scan_with_stats` (mft_ms + walk_ms + build_tree_ms + overhead).
@@ -180,6 +193,7 @@ impl From<(u64, u64, &ScanStats)> for ScanStatsEvent {
             mft_attempted: s.mft_attempted,
             mft_succeeded: s.mft_succeeded,
             mft_ms: s.mft_ms,
+            mft_failure_reason: s.mft_failure_reason.clone(),
             walk_ms: s.walk_ms,
             build_tree_ms: s.build_tree_ms,
             scanner_total_ms: s.total_ms,
@@ -1416,6 +1430,87 @@ fn delete_secret(app: AppHandle, account: String) -> Result<(), String> {
     }
 }
 
+/// Prune quarantine entries older than `ttl_days`. Returns a summary of
+/// how many items and bytes were removed. `ttl_days = 0` removes everything.
+#[tauri::command]
+fn prune_quarantine_cmd(
+    state: State<'_, AppState>,
+    ttl_days: u32,
+) -> Result<PruneResult, String> {
+    let root = state.quarantine_root.clone();
+    let (count, bytes) =
+        pinkbin_executor::prune_quarantine(&root, ttl_days).map_err(|e| e.to_string())?;
+    Ok(PruneResult {
+        removed_count: count,
+        removed_bytes: bytes,
+    })
+}
+
+#[derive(serde::Serialize, Clone)]
+struct PruneResult {
+    removed_count: u64,
+    removed_bytes: u64,
+}
+
+/// Read the last entry from `undo.jsonl`. Returns `None` when the log is
+/// empty or missing. The frontend uses this to show "撤销最近一次" with
+/// the action's reason and a path hint for where to find deleted files.
+/// Skips dry-run entries — the UI only wants to show real operations.
+#[tauri::command]
+fn last_undo_entry(state: State<'_, AppState>) -> Result<Option<UndoEntry>, String> {
+    let path = &state.undo_log;
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    // Read the last non-empty, non-dry-run line.
+    for line in content.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<UndoEntry>(line) {
+            Ok(entry) if !entry.dry_run => return Ok(Some(entry)),
+            Ok(_) => continue, // skip dry-run entries
+            Err(e) => return Err(format!("undo.jsonl parse error: {e}")),
+        }
+    }
+    Ok(None)
+}
+
+/// Open the OS recycle bin / trash. On Windows this is
+/// `explorer.exe shell:RecycleBinFolder`; on macOS `open ~/.Trash`;
+/// on Linux `xdg-open trash:///`. The user can then right-click →
+/// restore any file they cleaned via Recycle mode.
+#[tauri::command]
+fn open_recycle_bin() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg("shell:RecycleBinFolder")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(format!(
+                "{}/.Trash",
+                std::env::var("HOME").unwrap_or_default()
+            ))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg("trash:///")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -1438,6 +1533,21 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).ok();
             let undo_log = data_dir.join("undo.jsonl");
             let quarantine_root = data_dir.join("quarantine");
+
+            // Auto-prune quarantine entries older than 7 days on startup.
+            // The disk-cleaner eating its own disk would be embarrassing.
+            {
+                let qr = quarantine_root.clone();
+                if let Ok((count, bytes)) = pinkbin_executor::prune_quarantine(&qr, 7) {
+                    if count > 0 {
+                        tracing::info!(
+                            "startup quarantine prune: removed {} items ({} bytes)",
+                            count,
+                            bytes
+                        );
+                    }
+                }
+            }
 
             let scaffolds = load_all_scaffolds(app.handle());
             tracing::info!("loaded {} scaffolds", scaffolds.len());
@@ -1474,6 +1584,9 @@ pub fn run() {
             store_secret,
             load_secret,
             delete_secret,
+            prune_quarantine_cmd,
+            last_undo_entry,
+            open_recycle_bin,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

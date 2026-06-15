@@ -1,6 +1,6 @@
-import { lazy, Suspense, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
-import { ChevronRight, ChevronDown, Sparkles, MessageSquare, Trash2, FolderOpen, Copy, ExternalLink, Gamepad2 } from 'lucide-react';
+import { ChevronRight, ChevronDown, Sparkles, MessageSquare, Trash2, FolderOpen, Copy, ExternalLink, Gamepad2, ArchiveX, Undo2 } from 'lucide-react';
 import { useStore } from '../store';
 import { formatBytes } from '../format';
 import { api } from '../api';
@@ -79,6 +79,38 @@ export function Studio() {
   const hidden = getBool('hideStudio', false);
   const scanInProgress = useStore((s) => s.scanInProgress);
 
+  const [pruneMsg, setPruneMsg] = useState<string | null>(null);
+  const [pruneLoading, setPruneLoading] = useState(false);
+  const handlePruneQuarantine = useCallback(async () => {
+    setPruneLoading(true);
+    setPruneMsg(null);
+    try {
+      const r = await api.pruneQuarantine(7);
+      setPruneMsg(
+        r.removed_count > 0
+          ? `已清理 ${r.removed_count} 个过期文件 · ${formatBytes(r.removed_bytes)}`
+          : 'quarantine 目录没有过期文件'
+      );
+    } catch (e) {
+      setPruneMsg(`清理失败：${String(e)}`);
+    } finally {
+      setPruneLoading(false);
+    }
+  }, []);
+
+  const [lastUndo, setLastUndo] = useState<import('../types').UndoEntry | null>(null);
+  useEffect(() => {
+    api.lastUndoEntry().then(setLastUndo).catch(() => {});
+  }, []);
+  const handleUndo = useCallback(async () => {
+    if (!lastUndo) return;
+    if (lastUndo.action === 'recycle') {
+      try { await api.openRecycleBin(); } catch { /* noop */ }
+    }
+    // quarantine / delete: nothing actionable from the OS side; the button
+    // just shows the reason so the user knows what happened.
+  }, [lastUndo]);
+
   const allCards: CardData[] = useMemo(() => {
     if (hidden) return [];
     const items: CardData[] = scaffolds.map((sc) => {
@@ -123,8 +155,39 @@ export function Studio() {
     <div className={clsx('studio', scanInProgress && 'stale')}>
       <div className="studio-head">
         <span>Studio</span>
-        <span className="muted small">{allCards.length} 个脚本</span>
+        <div className="studio-head-actions">
+          <span className="muted small">{allCards.length} 个脚本</span>
+          {lastUndo && (
+            <button
+              className="ghost studio-undo-btn"
+              onClick={handleUndo}
+              title={
+                lastUndo.action === 'recycle'
+                  ? `打开回收站还原 · ${lastUndo.reason}`
+                  : lastUndo.action === 'quarantine'
+                    ? `文件已移入 quarantine · ${lastUndo.reason}`
+                    : `文件已永久删除 · ${lastUndo.reason}`
+              }
+            >
+              <Undo2 size={12} />
+              撤销 · {lastUndo.reason.length > 20 ? lastUndo.reason.slice(0, 20) + '…' : lastUndo.reason}
+            </button>
+          )}
+          <button
+            className="ghost studio-prune-btn"
+            onClick={handlePruneQuarantine}
+            disabled={pruneLoading}
+            title="清理超过 7 天的 quarantine 文件"
+          >
+            <ArchiveX size={12} />
+            {pruneLoading ? '清理中…' : '清空 quarantine'}
+          </button>
+        </div>
       </div>
+
+      {pruneMsg && (
+        <div className="studio-prune-msg muted small" aria-live="polite">{pruneMsg}</div>
+      )}
 
       {allCards.length === 0 && !scanInProgress && (
         <div className="studio-empty muted">脚本加载中…</div>

@@ -133,12 +133,49 @@ Windows 上直读 NTFS Master File Table（其他平台用 jwalk 跨平台 walke
 
 ---
 
+## 最近改进
+
+逐项落地 high 级别的性能 / 安全 / 可用性问题：
+
+### MFT 扫描器优化（`crates/scanner/src/mft.rs` + `lib.rs`）
+
+1. **HashMap 预分配 cap** — 原 `HashMap::with_capacity(total_records)` 在 4TB / 损坏 NTFS 上直接 OOM。改为 `cap.min(1_000_000)`，Map 按需增长。
+2. **Bounded DFS 环检测** — `rollup()` 加 `depth: u32` 参数，>1024 层 `tracing::warn` 并返回 (0,0)，junction/symlink 环不再 stack overflow。
+3. **删除 O(N²) top_extensions rollup** — `build_node` 不再把所有子目录的 `top_extensions` 合并到父节点，只统计 immediate children，与 walkdir 语义对齐。
+4. **MFT subroot 找不到时返回错误** — `find_frn_for_path(...).ok_or_else(...)` 替代 `unwrap_or(root_frn)`，拼错路径不再静默返回整棵 D: 树，walkdir fallback 正常接管。
+5. **ScanStats.mft_failure_reason** — MFT 失败时记录原因，前端可渲染 "re-run as Administrator for 10× speedup" 提示。
+6. **scan-progress 50ms 节流** — `AtomicU64` 毫秒时间戳节流，前端 React 主线程不再被每秒数千次 IPC 卡死。
+7. **Windows 长路径 `\\?\` 前缀** — 路径 >240 字符自动加 `\\?\`，WeChat/conda 深嵌套不再触发 260 限制。
+
+### scaffold-lint 改进（`crates/scaffold-lint/src/lib.rs` + `main.rs`）
+
+8. **红线检测升级为 glob 匹配** — 原 `contains("*.db")` 可被 `**/*.db?` 绕过。改为编译 scope glob + 14 条合成 fixture 路径走 `is_match`。
+9. **`--emit-mock` 子命令** — 从 `scaffolds/*.toml` 自动生成 TypeScript `SCAFFOLDS` 数组，消除手写 mock 与 TOML 不同步。
+10. **`--check-mock` CI 校验** — 比对 TOML id 集合与 mocks.ts id 集合，不一致时 exit 1。
+
+### scaffold 加载硬化（`crates/scaffold/src/lib.rs`）
+
+11. **expand_env 后 globset 语法预检** — `%VAR%` 未展开时 `tracing::error` 报告 scaffold id + 原始 pattern，glob 编译失败从 `warn` 升级为 `error`。
+
+### executor / UI 改进
+
+12. **UndoEntry.dry_run 字段** — dry-run 操作标记 `dry_run: true`，UI "撤销"按钮跳过 dry-run 条目。
+13. **prune_quarantine** — `pub fn prune_quarantine(root, ttl_days)` + 启动时自动清理 7 天前条目 + Studio "清空 quarantine" 按钮。
+14. **last_undo_entry + open_recycle_bin** — Studio "撤销"按钮：读 undo.jsonl 末条（跳过 dry-run），recycle 操作直接打开系统回收站。
+15. **CleanupModal armed 状态可访问性** — 倒计时（`setInterval` 秒级递减）、`aria-pressed`、文案 "⚠ 再点一次开预览 (5s)"、橙色 3px 边框替代红色背景 + pulse 动画。
+16. **DryRunPreviewDialog FocusTrap + Escape** — 嵌套 modal 加 FocusTrap、Escape 关闭、`aria-live="polite"` 状态播报。
+
+---
+
 ## 路线图
 
 - [x] 整盘秒扫，看到每个文件夹占多少
 - [x] 拖任意文件夹给 AI 问"这是什么、能不能删"
 - [x] 微信、Conda 已经支持一键清理
-- [ ] 加一个"撤销"按钮，删错了能一键找回
+- [x] 撤销按钮 + 回收站一键打开
+- [x] quarantine 自动清理 + 手动清空
+- [x] MFT 扫描器性能 / 内存 / 长路径优化
+- [x] scaffold-lint 红线 glob 匹配 + mock 自动生成 + CI 校验
 - [ ] 把更多常见软件加进来：Steam、Chrome、Docker、npm/pip、HuggingFace、OBS、各种 IDE 缓存……
 - [ ] 出 macOS / Linux 的预编译版（要先解决签名 + 真机验证）
 - [ ] 让用户能自己写、自己分享清理脚本

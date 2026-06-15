@@ -83,6 +83,7 @@ export interface UndoEntry {
   source: string;
   destination?: string | null;
   reason: string;
+  dry_run?: boolean;
 }
 
 /// One scope whose compiled glob matches a given path. Returned by

@@ -100,6 +100,9 @@ pub struct ScanStats {
     pub mft_attempted: bool,
     pub mft_succeeded: bool,
     pub mft_ms: u64,  // total time spent in the MFT branch (success or fallback)
+    /// Why MFT failed (if it did). Frontend renders this as a tip:
+    /// "re-run as Administrator for 10× speedup".
+    pub mft_failure_reason: Option<String>,
     pub walk_ms: u64, // jwalk consume loop (only set in walkdir mode)
     pub build_tree_ms: u64, // build_tree recursion + 2nd read_dir pass
     pub total_ms: u64,
@@ -132,6 +135,17 @@ where
     F: Fn(&ScanProgress) + Send + Sync,
 {
     let root = root.as_ref().to_path_buf();
+    // On Windows, prepend \\?\ for paths that may exceed the 260-char limit.
+    // WeChat / conda / node_modules nests often hit this on deep drives.
+    #[cfg(windows)]
+    let root = {
+        let s = root.to_string_lossy();
+        if !s.starts_with("\\\\?\\") && s.len() > 240 {
+            PathBuf::from(format!("\\\\?\\{s}"))
+        } else {
+            root
+        }
+    };
     let total_t0 = Instant::now();
     let mut stats = ScanStats::default();
     tracing::info!("scan: start root={:?}", root);
@@ -190,6 +204,7 @@ where
                 }
                 Err(e) => {
                     stats.mft_ms = mft_t0.elapsed().as_millis() as u64;
+                    stats.mft_failure_reason = Some(format!("{e:#}"));
                     tracing::warn!(
                         "MFT scan failed after {} ms, falling back to walkdir: {e:#}",
                         stats.mft_ms

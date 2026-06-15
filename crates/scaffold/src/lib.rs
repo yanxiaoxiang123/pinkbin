@@ -278,7 +278,20 @@ pub fn compile_all(scaffolds: &[Scaffold]) -> Vec<CompiledScaffold> {
             let mut builder = globset::GlobSetBuilder::new();
             let mut accepted: Vec<String> = Vec::with_capacity(s.detect.len());
             for d in &s.detect {
-                let pat = norm(&expand_env(d)).to_lowercase();
+                let expanded = norm(&expand_env(d));
+                let pat = expanded.to_lowercase();
+                // #26: If expand_env left %VAR% tokens in place (env var not
+                // set), the resulting pattern may contain literal `{`, `[`, `%`
+                // that break glob compilation. Detect unexpanded vars and
+                // surface them as errors instead of silently deactivating the
+                // scaffold's detect set.
+                if expanded.contains('%') {
+                    tracing::error!(
+                        "scaffold {}: detect pattern {:?} has unexpanded %VAR% after expand_env → {:?}. \
+                         The scaffold's detect set will be incomplete. Set the missing env var or fix the pattern.",
+                        s.id, d, expanded
+                    );
+                }
                 match globset::GlobBuilder::new(&pat)
                     .literal_separator(false)
                     .case_insensitive(true)
@@ -289,11 +302,10 @@ pub fn compile_all(scaffolds: &[Scaffold]) -> Vec<CompiledScaffold> {
                         accepted.push(pat);
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "scaffold {}: skipping bad detect pattern {:?}: {}",
-                            s.id,
-                            d,
-                            e
+                        tracing::error!(
+                            "scaffold {}: bad detect pattern {:?} (expanded: {:?}): {}. \
+                             Skipping this pattern — scaffold may not be detected.",
+                            s.id, d, expanded, e
                         );
                     }
                 }

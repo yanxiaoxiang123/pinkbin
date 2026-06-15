@@ -266,6 +266,8 @@ pub struct UndoEntry {
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
     pub reason: String,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 pub fn execute(
@@ -301,6 +303,7 @@ pub fn execute_with_cancel(
                 source: p.clone(),
                 destination: None,
                 reason: format!("dry-run: {}", plan.reason),
+                dry_run: true,
             });
         }
         write_log_atomic(undo_log, &out)?;
@@ -344,6 +347,7 @@ pub fn execute_with_cancel(
                     source: src.clone(),
                     destination: None,
                     reason: plan.reason.clone(),
+                    dry_run: false,
                 };
                 append_log_atomic(undo_log, &entry)?;
                 out.push(entry);
@@ -394,6 +398,7 @@ pub fn execute_with_cancel(
                     source: src.clone(),
                     destination: Some(dst),
                     reason: plan.reason.clone(),
+                    dry_run: false,
                 });
                 append_log_atomic(undo_log, out.last().unwrap())?;
             }
@@ -443,6 +448,7 @@ pub fn execute_with_cancel(
                     source: p.clone(),
                     destination: None,
                     reason: plan.reason.clone(),
+                    dry_run: false,
                 });
                 append_log_atomic(undo_log, out.last().unwrap())?;
             }
@@ -519,6 +525,82 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Remove quarantined items older than `ttl_days` from `quarantine_root`.
+///
+/// Quarantine filenames are `{timestamp_ms}-{original_name}` (see the
+/// `Action::Quarantine` branch in `execute_with_cancel`). This function
+/// extracts the leading timestamp, compares it against `now - ttl_days`,
+/// and deletes entries that exceed the TTL. Non-matching filenames (e.g.
+/// `undo.jsonl` or other metadata) are silently skipped.
+///
+/// Returns `(removed_count, removed_bytes)` so the caller can report
+/// how much space was reclaimed.
+pub fn prune_quarantine(
+    quarantine_root: &Path,
+    ttl_days: u32,
+) -> anyhow::Result<(u64, u64)> {
+    if !quarantine_root.exists() {
+        return Ok((0, 0));
+    }
+    let cutoff_ms = chrono::Utc::now().timestamp_millis()
+        - (ttl_days as i64) * 86_400_000;
+    let mut removed_count: u64 = 0;
+    let mut removed_bytes: u64 = 0;
+
+    for entry in std::fs::read_dir(quarantine_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Parse leading timestamp before the first '-'.
+        let ts_ms: i64 = match name_str.split('-').next().and_then(|s| s.parse().ok()) {
+            Some(ts) => ts,
+            None => continue,
+        };
+        if ts_ms >= cutoff_ms {
+            continue;
+        }
+
+        let path = entry.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let size = if meta.is_dir() {
+            dir_size_recursive(&path)
+        } else {
+            meta.len()
+        };
+
+        if meta.is_dir() {
+            if std::fs::remove_dir_all(&path).is_ok() {
+                removed_count += 1;
+                removed_bytes += size;
+            }
+        } else if std::fs::remove_file(&path).is_ok() {
+            removed_count += 1;
+            removed_bytes += size;
+        }
+    }
+
+    Ok((removed_count, removed_bytes))
+}
+
+/// Sum the size of every file under `dir`, non-recursively following dirs.
+fn dir_size_recursive(dir: &Path) -> u64 {
+    let mut total: u64 = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_dir() {
+                total = total.saturating_add(dir_size_recursive(&entry.path()));
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
 }
 
 #[cfg(test)]
@@ -690,6 +772,7 @@ mod tests {
                 source: dir.join(format!("file-{i}.txt")),
                 destination: None,
                 reason: format!("entry {i}"),
+                dry_run: false,
             })
             .collect();
 
