@@ -25,22 +25,7 @@ const ICONS: Record<string, string> = {
 
 /// Collect every top-level node tagged with `scaffoldId`. We deliberately
 /// don't recurse into a subtree that already matched — a single scaffold
-/// rarely re-tags itself deeper, and skipping the descent keeps walks under
-/// each match disjoint so scope_sizes aggregation can't double-count the
-/// same files.
-function findAllMatchesByScaffold(root: Node | null, scaffoldId: string): Node[] {
-  if (!root) return [];
-  const out: Node[] = [];
-  const dfs = (n: Node) => {
-    if (n.scaffold_id === scaffoldId) {
-      out.push(n);
-      return;
-    }
-    for (const c of n.children ?? []) dfs(c);
-  };
-  dfs(root);
-  return out;
-}function fallbackByNameContains(root: Node | null, sc: Scaffold): Node | null {
+function fallbackByNameContains(root: Node | null, sc: Scaffold): Node | null {
   const fragments = (sc.match?.name_contains ?? []).map((s) => s.toLowerCase());
   if (fragments.length === 0 || !root) return null;
   const dfs = (n: Node | null): Node | null => {

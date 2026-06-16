@@ -15,15 +15,25 @@ import { redactAdvisorRequest, redactPath, redactSample, redactSamples } from '.
 
 export type Provider = 'openai' | 'anthropic' | 'gemini' | 'ollama';
 
+export interface AdvancedSettings {
+  temperature: number;
+  maxTokens: number;
+  stream: boolean;
+  systemPromptOverride: string;
+}
+
+export const DEFAULT_ADVANCED: AdvancedSettings = {
+  temperature: 0.2,
+  maxTokens: 2048,
+  stream: true,
+  systemPromptOverride: '',
+};
+
 export interface AdvisorSettings {
   provider: Provider;
   model: string;
   baseUrl: string;
-  // The API key is no longer persisted here — it lives in the OS
-  // credential manager (Windows Credential Manager / macOS Keychain /
-  // Linux libsecret) and is fetched on demand via `getApiKey()`. The
-  // webview's localStorage is a plaintext file on disk, so storing keys
-  // there is a confidentiality hole (sync folders, disk forensics, etc.).
+  advanced?: AdvancedSettings;
 }
 
 /// The single keyring slot we use for the advisor's API key. The
@@ -103,6 +113,8 @@ type FormatArgs = {
   jsonMode: boolean;
   model: string;
   stream: boolean;
+  temperature: number;
+  maxTokens: number;
 };
 
 type ProviderConfig = {
@@ -125,7 +137,7 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${key}`,
     }),
-    formatRequest: ({ system, user, images, jsonMode, model, stream }) => {
+    formatRequest: ({ system, user, images, jsonMode, model, stream, temperature, maxTokens }) => {
       const userContent: unknown = !images || images.length === 0
         ? user
         : [
@@ -135,6 +147,8 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
       const body: Record<string, unknown> = {
         model,
         stream,
+        max_tokens: maxTokens,
+        temperature,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent },
@@ -158,7 +172,7 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     }),
-    formatRequest: ({ system, user, images, model, stream }) => {
+    formatRequest: ({ system, user, images, model, stream, temperature, maxTokens }) => {
       const content: unknown[] = [];
       if (images && images.length > 0) {
         for (const img of images) {
@@ -171,7 +185,8 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
       content.push({ type: 'text', text: user });
       return {
         model,
-        max_tokens: stream ? 4096 : 2048,
+        max_tokens: maxTokens,
+        temperature,
         stream,
         system,
         messages: [{ role: 'user', content }],
@@ -194,7 +209,7 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
       return `${base}/v1beta/models/${encodeURIComponent(s.model)}:${endpoint}?key=${encodeURIComponent(key)}`;
     },
     headers: () => ({ 'Content-Type': 'application/json' }),
-    formatRequest: ({ system, user, images, jsonMode, stream }) => {
+    formatRequest: ({ system, user, images, jsonMode, stream, temperature, maxTokens }) => {
       const parts: unknown[] = [];
       if (images && images.length > 0) {
         for (const img of images) {
@@ -206,13 +221,11 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts }],
       };
-      if (jsonMode) {
-        body.generationConfig = { responseMimeType: 'application/json', temperature: 0.2 };
-      } else if (stream) {
-        body.generationConfig = { temperature: 0.4 };
-      } else {
-        body.generationConfig = { temperature: 0.2 };
-      }
+      body.generationConfig = {
+        ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+        temperature,
+        maxOutputTokens: maxTokens,
+      };
       return body;
     },
     extract: (data) => extractField(data, ['candidates', 0, 'content', 'parts', 0, 'text']),
@@ -225,12 +238,13 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
       return `${base}/api/chat`;
     },
     headers: () => ({ 'Content-Type': 'application/json' }),
-    formatRequest: ({ system, user, images, model, stream }) => {
+    formatRequest: ({ system, user, images, model, stream, temperature }) => {
       const userMsg: Record<string, unknown> = { role: 'user', content: user };
       if (images && images.length > 0) userMsg.images = images.map((i) => dataUrlBase64(i.dataUrl));
       return {
         model,
         stream,
+        options: { temperature },
         messages: [
           { role: 'system', content: system },
           userMsg,
@@ -252,7 +266,8 @@ export async function runCompletion(
   const cfg = PROVIDERS[settings.provider];
   if (!cfg) throw new Error(`Unknown provider: ${settings.provider}`);
 
-  const stream = Boolean(req.onChunk) && !req.jsonMode;
+  const adv = settings.advanced ?? DEFAULT_ADVANCED;
+  const stream = adv.stream && Boolean(req.onChunk) && !req.jsonMode;
   const url = cfg.url(settings, key, stream);
   const headers = cfg.headers(settings, key);
   const body = cfg.formatRequest({
@@ -262,6 +277,8 @@ export async function runCompletion(
     jsonMode: Boolean(req.jsonMode),
     model: settings.model,
     stream,
+    temperature: adv.temperature,
+    maxTokens: adv.maxTokens,
   });
 
   const r = await fetch(url, {
@@ -297,8 +314,10 @@ export async function callAdvisor(
   // (filenames that try to coerce the model). See privacy.ts.
   const safeReq = redactAdvisorRequest(req as unknown as Parameters<typeof redactAdvisorRequest>[0]);
   const userPrompt = JSON.stringify(safeReq, null, 2);
+  const adv = settings.advanced ?? DEFAULT_ADVANCED;
+  const systemPrompt = adv.systemPromptOverride?.trim() || SYSTEM_PROMPT;
   const text = await runCompletion(settings, key ?? '', {
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     user: userPrompt,
     jsonMode: true,
   });

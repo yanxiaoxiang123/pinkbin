@@ -10,7 +10,9 @@ import {
   clearSettings,
   ADVISOR_KEY_ACCOUNT,
   invalidateApiKey,
+  DEFAULT_ADVANCED,
   type Provider,
+  type AdvancedSettings,
 } from '../advisorClient';
 
 type Props = { onClose: () => void };
@@ -40,6 +42,8 @@ export function Settings({ onClose }: Props) {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [advanced, setAdvanced] = useState<AdvancedSettings>({ ...DEFAULT_ADVANCED });
 
   useEffect(() => {
     const existing = loadSettings();
@@ -47,6 +51,7 @@ export function Settings({ onClose }: Props) {
       setProvider(existing.provider);
       setModel(existing.model);
       setBaseUrl(existing.baseUrl);
+      if (existing.advanced) setAdvanced(existing.advanced);
       setSaved(true);
     }
     // Mark loaded only after both sync settings and the async keychain
@@ -72,7 +77,7 @@ export function Settings({ onClose }: Props) {
       // it survives reload without an OS keychain round-trip on startup.
       // The key itself goes to the credential manager — never to
       // localStorage, which is a plaintext file on disk.
-      saveSettings({ provider, model, baseUrl });
+      saveSettings({ provider, model, baseUrl, advanced });
       if (needsKey) {
         await api.storeSecret(ADVISOR_KEY_ACCOUNT, apiKey);
       } else {
@@ -100,6 +105,7 @@ export function Settings({ onClose }: Props) {
     setApiKey('');
     setBaseUrl('');
     setModel('');
+    setAdvanced({ ...DEFAULT_ADVANCED });
     setSaved(false);
     setMsg('已清除本地保存的配置和钥匙串里的 key');
     useStore.getState().setAdvisorReady(false);
@@ -196,6 +202,80 @@ export function Settings({ onClose }: Props) {
             disabled={!loaded}
           />
         </label>
+
+        <div className="settings-advanced-toggle">
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            {showAdvanced ? '▾ 高级设置' : '▸ 高级设置'}
+          </button>
+        </div>
+
+        {showAdvanced && (
+          <div className="settings-advanced-panel">
+            <label className="field">
+              <span>Temperature（创造性 0–2）</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  value={advanced.temperature}
+                  onChange={(e) => setAdvanced((a) => ({ ...a, temperature: Number(e.target.value) }))}
+                  style={{ flex: 1 }}
+                />
+                <span className="mono-num" style={{ minWidth: 36, textAlign: 'right' }}>{advanced.temperature}</span>
+              </div>
+            </label>
+
+            <label className="field">
+              <span>Max Tokens（回复长度上限）</span>
+              <input
+                type="number"
+                min={256}
+                max={16384}
+                step={256}
+                value={advanced.maxTokens}
+                onChange={(e) => setAdvanced((a) => ({ ...a, maxTokens: Number(e.target.value) }))}
+              />
+            </label>
+
+            <label className="field">
+              <span>Streaming（逐字输出）</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={advanced.stream}
+                  onChange={(e) => setAdvanced((a) => ({ ...a, stream: e.target.checked }))}
+                />
+                <span className="muted small">{advanced.stream ? '开启' : '关闭（一次性返回）'}</span>
+              </div>
+            </label>
+
+            <label className="field">
+              <span>System Prompt Override（留空用默认）</span>
+              <textarea
+                value={advanced.systemPromptOverride}
+                onChange={(e) => setAdvanced((a) => ({ ...a, systemPromptOverride: e.target.value }))}
+                placeholder="留空 = 使用内置 prompt"
+                rows={4}
+                style={{ resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+              />
+            </label>
+
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setAdvanced({ ...DEFAULT_ADVANCED })}
+              style={{ fontSize: 11 }}
+            >
+              恢复默认
+            </button>
+          </div>
+        )}
 
         {msg && <div className="ok">{msg}</div>}
         {err && <div className="error">{err}</div>}

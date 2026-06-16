@@ -20,14 +20,14 @@ export interface Node {
 }
 
 export type Risk = 'low' | 'medium' | 'high';
-export type Mode = 'recycle' | 'quarantine' | 'delete';
-export type Action = Mode | 'keep' | 'custom';
+export type ScaffoldAction = 'recycle' | 'quarantine' | 'delete';
+export type AdviceAction = ScaffoldAction | 'keep' | 'custom';
 
 export interface Scope {
   id: string;
   label: string;
   glob: string;
-  mode: Mode;
+  mode: ScaffoldAction;
   category?: 'cache' | 'media' | 'backup' | 'envs';
   variant?: string;
   recycle_granularity?: RecycleGranularity;
@@ -65,7 +65,7 @@ export interface AdvisorResponse {
   category: string;
   safe_to_delete: boolean;
   risk: Risk;
-  action: Action;
+  action: AdviceAction;
   reasoning: string;
   needs_inspection: boolean;
   suggested_scaffold?: string | null;
@@ -92,7 +92,19 @@ export interface UndoEntry {
 export interface ScopeMatch {
   scaffold_id: string;
   scope_id: string;
-  mode: 'recycle' | 'quarantine' | 'delete';
+  mode: ScaffoldAction;
+}
+
+/// Mirror of Rust `ScopeSize` (apps/desktop/src-tauri/src/lib.rs).
+/// `bytes` / `file_count` honour retention; `total_bytes` / `total_files`
+/// ignore it — the UI uses the gap to explain "12 GB total · 0 GB older
+/// than 90d will be cleaned".
+export interface ScopeSize {
+  scope_id: string;
+  bytes: number;
+  file_count: number;
+  total_bytes: number;
+  total_files: number;
 }
 
 /// Mirror of Rust's CondaEnv (apps/desktop/src-tauri/src/lib.rs). Returned

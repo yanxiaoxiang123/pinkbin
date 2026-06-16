@@ -6,8 +6,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { getJson, setJson } from '../../persist';
-import type { Node } from '../../types';
-import type { ScopeSize } from './types';
+import type { Node, ScopeSize } from '../../types';
 
 // ── scopeDays persistence ───────────────────────────────────────────────
 

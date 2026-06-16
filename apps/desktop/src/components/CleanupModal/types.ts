@@ -1,18 +1,4 @@
-// Types shared across the CleanupModal split. Kept in one place so that
-// sub-components (ScopeGroup / CondaPicker / etc.) and the main modal
-// agree on the shape of scope-size rows and dry-run previews.
-
-export interface ScopeSize {
-  scope_id: string;
-  /** Bytes that match scope glob AND are older than the requested retention. */
-  bytes: number;
-  file_count: number;
-  /** Bytes inside the scope regardless of retention — UI uses this so users
-   *  can see "12 GB total · 0 GB older than 90d will be cleaned" instead of
-   *  the misleading "空" that used to render when retention spared everything. */
-  total_bytes: number;
-  total_files: number;
-}
+// Types shared across the CleanupModal split.
 
 export interface DryRunPreview {
   scopeIds: string[];

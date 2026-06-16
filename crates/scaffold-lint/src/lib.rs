@@ -171,6 +171,46 @@ pub fn lint_scaffold_text(text: &str, source: &str) -> Vec<Diagnostic> {
         }
     }
 
+    // ── Variant consistency ──
+    // If scopes use `variant`, each variant value must have at least one
+    // distinguishable detect pattern or name_contains entry — otherwise the
+    // scope is a "ghost" (always shown in UI but never matched).
+    {
+        let variants: std::collections::HashSet<&str> = scaffold
+            .scopes
+            .iter()
+            .filter_map(|sc| sc.variant.as_deref())
+            .collect();
+        if variants.len() > 1 {
+            let detect_lc: Vec<String> = scaffold
+                .detect
+                .iter()
+                .map(|d| d.to_lowercase())
+                .collect();
+            let name_contains_lc: Vec<String> = scaffold
+                .matcher
+                .name_contains
+                .iter()
+                .map(|n| n.to_lowercase())
+                .collect();
+            for v in &variants {
+                let v_lower = v.to_lowercase();
+                let has_detect = detect_lc
+                    .iter()
+                    .any(|d| d.contains(&v_lower));
+                let has_name = name_contains_lc
+                    .iter()
+                    .any(|n| n.contains(&v_lower));
+                if !has_detect && !has_name {
+                    diags.push(Diagnostic::warn(format!(
+                        "variant `{v}` has no distinguishing detect pattern or name_contains entry — \
+                         scopes with this variant may never be matched"
+                    )).at(source));
+                }
+            }
+        }
+    }
+
     diags
 }
 

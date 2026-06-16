@@ -8,12 +8,12 @@ use include_dir::{include_dir, Dir};
 use pinkbin_advisor::{
     advise as advise_provider, AdvisorRequest, AdvisorResponse, Provider, SecretString,
 };
-use pinkbin_executor::{Plan, UndoEntry};
+use pinkbin_executor::{Action, Plan, UndoEntry};
 use pinkbin_scaffold::{
-    compile_all, detect_compiled, detect_for, expand_env, load_dir, parse_toml, CompiledScaffold,
+    compile_all, detect_compiled, expand_env, load_dir, parse_toml, CompiledScaffold,
     RecycleGranularity, Scaffold,
 };
-use pinkbin_scanner::{sample_paths, scan_with_stats, Node, ScanOptions, ScanStats, SCAN_CANCELLED};
+use pinkbin_scanner::{scan_with_stats, Node, ScanOptions, ScanStats, SCAN_CANCELLED};
 use pinkbin_walker::{
     find_matching_dirs, mtime_older_than, path_passes_env, path_passes_wxid,
     pinkbin_walker,
@@ -357,12 +357,6 @@ fn volume_info(path: String) -> Result<VolumeInfo, String> {
     }
 }
 
-#[tauri::command]
-async fn detect_scaffold(state: State<'_, AppState>, path: String) -> Result<Option<String>, CommandError> {
-    let scaffolds = state.scaffolds.read().unwrap();
-    Ok(detect_for(&scaffolds, std::path::Path::new(&path)))
-}
-
 #[derive(serde::Serialize, Clone)]
 struct ScopeSize {
     scope_id: String,
@@ -614,6 +608,60 @@ async fn scope_sizes(
     .map_err(|e| e.to_string())
 }
 
+/// Shared tail of `execute_scope` / `execute_plan`: derive the executor
+/// `Action` from scope metadata (never from the caller), build the `Plan`,
+/// register the cancel flag, and run `execute_with_cancel` on a blocking
+/// thread. Both callers resolve `matched` paths differently but the rest
+/// was identical — this is the single source of truth for that logic.
+async fn dispatch_execution(
+    scope: &pinkbin_scaffold::Scope,
+    matched: Vec<PathBuf>,
+    reason: String,
+    dry_run: bool,
+    undo_log: PathBuf,
+    quarantine_root: PathBuf,
+    jobs: &Mutex<HashMap<String, Arc<AtomicBool>>>,
+    job_id: Option<String>,
+) -> Result<Vec<UndoEntry>, String> {
+    if matched.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Directory granularity is locked to Recycle — an entire directory removal
+    // is high cost to undo; recoverability via Recycle Bin is non-negotiable.
+    let action = if scope.recycle_granularity == RecycleGranularity::Directory {
+        Action::Recycle
+    } else {
+        scope.mode
+    };
+    let plan = Plan {
+        action,
+        paths: matched,
+        reason,
+    };
+
+    let cancel_flag: Option<Arc<AtomicBool>> = job_id.as_ref().map(|jid| {
+        jobs.lock()
+            .unwrap()
+            .entry(jid.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    });
+
+    tokio::task::spawn_blocking(move || {
+        pinkbin_executor::execute_with_cancel(
+            &plan,
+            dry_run,
+            &undo_log,
+            &quarantine_root,
+            cancel_flag.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
 /// Resolve a scaffold scope's glob to actual file paths under `root_path` and
 /// run the executor on just those files. Use this instead of feeding the
 /// matched root directly into `execute_plan` — the latter would delete the
@@ -666,58 +714,17 @@ async fn execute_scope(
     .await
     .map_err(|e| e.to_string())?;
 
-    if matched.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Directory granularity is locked to Recycle regardless of scope.mode —
-    // an entire directory removal is high cost to undo (rebuild conda env =
-    // minutes to hours, project node_modules = redownload everything),
-    // recoverability via Recycle Bin is non-negotiable. File granularity
-    // honors the scope's declared mode (recycle/quarantine/delete) as before.
-    let action = match (granularity, scope.mode) {
-        (RecycleGranularity::Directory, _) => pinkbin_executor::Action::Recycle,
-        (RecycleGranularity::File, pinkbin_scaffold::Mode::Recycle) => {
-            pinkbin_executor::Action::Recycle
-        }
-        (RecycleGranularity::File, pinkbin_scaffold::Mode::Quarantine) => {
-            pinkbin_executor::Action::Quarantine
-        }
-        (RecycleGranularity::File, pinkbin_scaffold::Mode::Delete) => {
-            pinkbin_executor::Action::Delete
-        }
-    };
-    let plan = Plan {
-        action,
-        paths: matched,
-        reason: format!("Pinkbin scaffold {}/{} (Studio)", scaffold.id, scope.id),
-    };
-    let undo_log = state.undo_log.clone();
-    let quarantine_root = state.quarantine_root.clone();
-
-    // Register the cancel flag before spawning so `cancel_job` can find it.
-    let cancel_flag: Option<Arc<AtomicBool>> = job_id.as_ref().map(|jid| {
-        state
-            .jobs
-            .lock()
-            .unwrap()
-            .entry(jid.clone())
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .clone()
-    });
-
-    tokio::task::spawn_blocking(move || {
-        pinkbin_executor::execute_with_cancel(
-            &plan,
-            dry_run,
-            &undo_log,
-            &quarantine_root,
-            cancel_flag.as_deref(),
-        )
-    })
+    dispatch_execution(
+        &scope,
+        matched,
+        format!("Pinkbin scaffold {}/{} (Studio)", scaffold.id, scope.id),
+        dry_run,
+        state.undo_log.clone(),
+        state.quarantine_root.clone(),
+        &state.jobs,
+        job_id,
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 /// Per-env metadata for the conda card's env list. `last_active_ts` is the
@@ -857,13 +864,6 @@ async fn advise(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-async fn inspect_path(path: String, sample_count: usize) -> Vec<String> {
-    tokio::task::spawn_blocking(move || sample_paths(&path, sample_count))
-        .await
-        .unwrap_or_default()
-}
-
 /// Open the OS file manager and reveal `path`. On Windows this uses
 /// `explorer.exe /select,...` for files (so the file is highlighted) or just
 /// the directory itself for directories. On macOS it's `open -R`. On Linux
@@ -961,57 +961,17 @@ async fn execute_plan(
         }
         matched.push(pb);
     }
-    if matched.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Derive action from the scope's declared mode, not the caller. This is
-    // the same policy `execute_scope` uses, including the directory-granularity
-    // override to Recycle.
-    let granularity = scope.recycle_granularity;
-    let action = match (granularity, scope.mode) {
-        (RecycleGranularity::Directory, _) => pinkbin_executor::Action::Recycle,
-        (RecycleGranularity::File, pinkbin_scaffold::Mode::Recycle) => {
-            pinkbin_executor::Action::Recycle
-        }
-        (RecycleGranularity::File, pinkbin_scaffold::Mode::Quarantine) => {
-            pinkbin_executor::Action::Quarantine
-        }
-        (RecycleGranularity::File, pinkbin_scaffold::Mode::Delete) => {
-            pinkbin_executor::Action::Delete
-        }
-    };
-
-    let plan = Plan {
-        action,
-        paths: matched,
-        reason: format!("{reason} [via {}/{}]", scaffold.id, scope.id),
-    };
-    let undo_log = state.undo_log.clone();
-    let quarantine_root = state.quarantine_root.clone();
-
-    let cancel_flag: Option<Arc<AtomicBool>> = job_id.as_ref().map(|jid| {
-        state
-            .jobs
-            .lock()
-            .unwrap()
-            .entry(jid.clone())
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .clone()
-    });
-
-    tokio::task::spawn_blocking(move || {
-        pinkbin_executor::execute_with_cancel(
-            &plan,
-            dry_run,
-            &undo_log,
-            &quarantine_root,
-            cancel_flag.as_deref(),
-        )
-    })
+    dispatch_execution(
+        &scope,
+        matched,
+        format!("{reason} [via {}/{}]", scaffold.id, scope.id),
+        dry_run,
+        state.undo_log.clone(),
+        state.quarantine_root.clone(),
+        &state.jobs,
+        job_id,
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 /// Set the cancel flag for a running job identified by `job_id`. The
@@ -1052,9 +1012,9 @@ async fn find_scope_for_path(
             match compile_scope_set_cached(&sc.glob, &state.compiled_scopes) {
                 Ok(set) if set.is_match(&normalized) => {
                     let mode = match sc.mode {
-                        pinkbin_scaffold::Mode::Recycle => "recycle",
-                        pinkbin_scaffold::Mode::Quarantine => "quarantine",
-                        pinkbin_scaffold::Mode::Delete => "delete",
+                        Action::Recycle => "recycle",
+                        Action::Quarantine => "quarantine",
+                        Action::Delete => "delete",
                     };
                     out.push(ScopeMatch {
                         scaffold_id: s.id.clone(),
@@ -1657,7 +1617,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_path,
             list_scaffolds,
-            detect_scaffold,
             scope_sizes,
             execute_scope,
             execute_plan,
@@ -1665,7 +1624,6 @@ pub fn run() {
             find_scope_for_path,
             list_conda_envs,
             advise,
-            inspect_path,
             reveal_in_explorer,
             set_advisor,
             volume_info,

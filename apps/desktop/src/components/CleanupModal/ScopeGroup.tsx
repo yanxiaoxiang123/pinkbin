@@ -3,8 +3,7 @@
 
 import { useMemo, type Dispatch, type SetStateAction } from 'react';
 import { formatBytes } from '../../format';
-import type { Scope } from '../../types';
-import type { ScopeSize } from './types';
+import type { Scope, ScopeSize } from '../../types';
 
 interface Props {
   label: string;

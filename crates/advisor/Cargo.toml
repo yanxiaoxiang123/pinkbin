@@ -14,3 +14,4 @@ reqwest.workspace    = true
 tokio.workspace      = true
 tracing.workspace    = true
 once_cell.workspace  = true
+async-trait          = "0.1"

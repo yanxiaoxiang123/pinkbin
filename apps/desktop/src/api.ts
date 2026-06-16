@@ -6,6 +6,7 @@ import type {
   AdvisorResponse,
   UndoEntry,
   ScopeMatch,
+  ScopeSize,
   CondaEnv,
   SteamInventory,
   WorkshopItem,
@@ -13,7 +14,6 @@ import type {
 import { isTauri } from './env';
 import * as mocks from './mocks';
 
-type ScopeSizeRow = { scope_id: string; bytes: number; file_count: number; total_bytes: number; total_files: number };
 type VolumeInfo = { total_bytes: number; used_bytes: number; free_bytes: number };
 type AdvisorProvider = 'openai' | 'anthropic' | 'gemini' | 'ollama';
 type SteamUrlAction = 'uninstall' | 'rungameid' | 'validate' | 'nav' | 'workshop_page';
@@ -24,14 +24,12 @@ type SteamUrlAction = 'uninstall' | 'rungameid' | 'validate' | 'nav' | 'workshop
 const tauri = {
   scan: (path: string, scanId?: string) => invoke<Node>('scan_path', { path, scanId: scanId ?? null }),
   listScaffolds: () => invoke<Scaffold[]>('list_scaffolds'),
-  detectScaffold: (path: string) => invoke<string | null>('detect_scaffold', { path }),
   scopeSizes: (scaffoldId: string, rootPath: string, scopeDays?: Record<string, number>, wxidFilter?: string[], envFilter?: string[]) =>
-    invoke<ScopeSizeRow[]>('scope_sizes', { scaffoldId, rootPath, scopeDays: scopeDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
+    invoke<ScopeSize[]>('scope_sizes', { scaffoldId, rootPath, scopeDays: scopeDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
   executeScope: (scaffoldId: string, scopeId: string, rootPath: string, dryRun: boolean, olderThanDays?: number, wxidFilter?: string[], envFilter?: string[], jobId?: string) =>
     invoke<UndoEntry[]>('execute_scope', { scaffoldId, scopeId, rootPath, dryRun, olderThanDays: olderThanDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null, jobId: jobId ?? null }),
   listCondaEnvs: (condaRoot: string) => invoke<CondaEnv[]>('list_conda_envs', { condaRoot }),
   advise: (req: AdvisorRequest) => invoke<AdvisorResponse>('advise', { req }),
-  inspect: (path: string, sampleCount: number) => invoke<string[]>('inspect_path', { path, sampleCount }),
   revealInExplorer: (path: string) => invoke<void>('reveal_in_explorer', { path }),
   // `execute` requires a scaffold_id + scope_id; the backend re-validates
   // every path against the scope's compiled glob, so callers cannot bypass
@@ -79,7 +77,6 @@ const browserSecretStore: Map<string, string> = new Map();
 const browser = {
   scan: (_path: string, _scanId?: string) => mocks.scan(_path),
   listScaffolds: () => Promise.resolve(mocks.SCAFFOLDS),
-  detectScaffold: (path: string) => mocks.detectScaffold(path),
   scopeSizes: (_scaffoldId: string, _rootPath: string, _scopeDays?: Record<string, number>, _wxidFilter?: string[], _envFilter?: string[]) =>
     mocks.scopeSizes(_scaffoldId, _rootPath),
   executeScope: (_scaffoldId: string, _scopeId: string, _rootPath: string, _dryRun: boolean, _olderThanDays?: number, _wxidFilter?: string[], _envFilter?: string[]) =>

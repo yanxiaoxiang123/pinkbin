@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
-type Mode = 'recycle' | 'quarantine' | 'delete';
+type ScaffoldAction = 'recycle' | 'quarantine' | 'delete';
 type Granularity = 'file' | 'directory';
 
 type Props = {
@@ -13,7 +13,7 @@ type Props = {
    *  the duration estimate. */
   estimatedCount: number;
   granularity?: Granularity;
-  mode?: Mode;
+  mode?: ScaffoldAction;
   onAction: () => Promise<void>;
   idleContent: ReactNode;
   runningLabel?: string;
@@ -25,7 +25,7 @@ type Props = {
 // with cross-volume copy fallback as the worst case. Over-estimating just
 // makes the bar climb slower; under-estimating pins it at 92% sooner — the
 // real promise resolution always jumps to 100% regardless.
-const RATE_TABLE: Record<Mode, Record<Granularity, number>> = {
+const RATE_TABLE: Record<ScaffoldAction, Record<Granularity, number>> = {
   recycle:    { file: 700,  directory: 8 },
   quarantine: { file: 60,   directory: 8 },
   delete:     { file: 1500, directory: 12 },

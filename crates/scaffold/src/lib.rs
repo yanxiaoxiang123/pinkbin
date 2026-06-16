@@ -1,5 +1,6 @@
 //! Loads scaffold TOML manifests and matches them against folders.
 
+pub use pinkbin_executor::Action;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -37,7 +38,7 @@ pub struct Scope {
     pub id: String,
     pub label: String,
     pub glob: String,
-    pub mode: Mode,
+    pub mode: Action,
     #[serde(default)]
     pub prompt: Option<Prompt>,
     /// Drives Studio's grouping: media → top, cache → merged into one button,
@@ -83,13 +84,6 @@ pub enum RecycleGranularity {
     Directory,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Recycle,
-    Quarantine,
-    Delete,
-}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]

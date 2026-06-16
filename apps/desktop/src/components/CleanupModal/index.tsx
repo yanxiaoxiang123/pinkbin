@@ -8,7 +8,7 @@ import FocusTrap from 'focus-trap-react';
 import { X, Trash2, Loader2, AlertTriangle } from 'lucide-react';
 import { api } from '../../api';
 import { formatBytes } from '../../format';
-import type { Node, Scaffold, CondaEnv } from '../../types';
+import type { Node, Scaffold, CondaEnv, ScopeSize } from '../../types';
 import { CondaPicker } from './CondaPicker';
 import { DryRunPreviewDialog } from './DryRunPreviewDialog';
 import { ScopeGroup } from './ScopeGroup';
@@ -19,9 +19,9 @@ import {
   useScopeSizes,
   type ScopeSizesFilters,
 } from './hooks';
-import { DRY_RUN_SAMPLE_CAP, type DryRunPreview, type ScopeSize } from './types';
+import { DRY_RUN_SAMPLE_CAP, type DryRunPreview } from './types';
 
-export type { DryRunPreview, ScopeSize } from './types';
+export type { DryRunPreview } from './types';
 
 interface Props {
   scaffold: Scaffold;

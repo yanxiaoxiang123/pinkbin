@@ -249,17 +249,6 @@ export async function scan(_path: string): Promise<Node> {
   return JSON.parse(JSON.stringify(MOCK_TREE));
 }
 
-export async function detectScaffold(path: string): Promise<string | null> {
-  const p = path.toLowerCase();
-  for (const s of SCAFFOLDS) {
-    for (const d of s.detect) {
-      const frag = d.replace(/\*\*?\//g, '').replace(/\\/g, '/').toLowerCase();
-      if (p.replace(/\\/g, '/').includes(frag)) return s.id;
-    }
-  }
-  return null;
-}
-
 export async function inspect(path: string, n: number): Promise<string[]> {
   await wait(150);
   const lower = path.toLowerCase();

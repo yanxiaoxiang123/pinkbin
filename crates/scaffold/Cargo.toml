@@ -6,6 +6,7 @@ license.workspace     = true
 repository.workspace  = true
 
 [dependencies]
+pinkbin-executor = { path = "../executor" }
 serde.workspace        = true
 toml.workspace         = true
 anyhow.workspace       = true
