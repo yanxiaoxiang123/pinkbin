@@ -90,7 +90,7 @@ export function useChat() {
       if ((e as Error).name === 'AbortError') {
         patchTurn(turnId, { text: accumulated, pending: false });
       } else {
-        patchTurn(turnId, { text: `AI 调用失败：${String(e)}`, pending: false });
+        patchTurn(turnId, { text: `AI 调用失败：${e instanceof Error ? e.message : String(e)}`, pending: false });
       }
     } finally {
       setBusy(false);
@@ -154,7 +154,7 @@ export function useChat() {
       if ((e as Error).name === 'AbortError') {
         patchTurn(turnId, { text: accumulated, pending: false });
       } else {
-        patchTurn(turnId, { text: `AI 调用失败：${String(e)}`, pending: false });
+        patchTurn(turnId, { text: `AI 调用失败：${e instanceof Error ? e.message : String(e)}`, pending: false });
       }
     } finally {
       setBusy(false);
@@ -170,7 +170,7 @@ export function useChat() {
     try {
       matches = await api.findScopeForPath(target.path);
     } catch (e) {
-      pushTurn({ id: uid(), role: 'system', text: `回收失败：${String(e)}` });
+      pushTurn({ id: uid(), role: 'system', text: `回收失败：${e instanceof Error ? e.message : String(e)}` });
       return;
     }
     // Strict: only proceed when exactly one scope claims the path. Zero
@@ -190,7 +190,7 @@ export function useChat() {
       addReclaimed(target.size);
       pushTurn({ id: uid(), role: 'system', text: `已回收 ${target.path} · 释放 ${formatBytes(target.size)}` });
     } catch (e) {
-      pushTurn({ id: uid(), role: 'system', text: `回收失败：${String(e)}` });
+      pushTurn({ id: uid(), role: 'system', text: `回收失败：${e instanceof Error ? e.message : String(e)}` });
     }
   }, [addReclaimed, pushTurn]);
 

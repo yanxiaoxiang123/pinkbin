@@ -13,7 +13,6 @@ type Props = {
   onSelect: (p: string) => void;
 };
 
-// Check if `el` or any ancestor has `[data-accept-drop]`.
 function isAcceptDropTarget(el: EventTarget | null): boolean {
   let node = (el as HTMLElement | null)?.closest('[data-accept-drop]');
   return node !== null;
@@ -39,9 +38,10 @@ type VisibleRow = NodeRow | TruncatedRow;
 export function TreeView({ root, selectedPath, onSelect }: Props) {
   const [ctx, setCtx] = useState<ContextMenuState | null>(null);
   const [open, setOpen] = useState<Set<string>>(() => new Set([root.path]));
+  const [activeIndex, setActiveIndex] = useState(0);
   const { ref: bodyRef, size } = useElementSize();
+  const listRef = useRef<FixedSizeList>(null);
 
-  // Helper: collect visible rows for a subtree (used for incremental expand).
   const collectVisibleRows = useCallback((n: Node, depth: number, parentSize: number, out: VisibleRow[]) => {
     if (depth > 0) {
       out.push({ kind: 'node', node: n, parentSize, depth });
@@ -59,27 +59,20 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
     }
   }, [open]);
 
-  // Initialize flatRows from root.
   const [flatRows, setFlatRows] = useState<VisibleRow[]>(() => {
     const out: VisibleRow[] = [];
     collectVisibleRows(root, 0, root.size || 1, out);
     return out;
   });
 
-  // Reset expanded paths whenever a new scan lands — old paths in the set
-  // simply miss on the new tree (no-op) but the explicit reset keeps
-  // memory from carrying paths that may not exist anymore.
   useEffect(() => {
     setOpen(new Set([root.path]));
     const out: VisibleRow[] = [];
     collectVisibleRows(root, 0, root.size || 1, out);
     setFlatRows(out);
+    setActiveIndex(0);
   }, [root.path, collectVisibleRows]);
 
-  // Global drop-target guard: when dragging a TreeView row over an element
-  // that does NOT have `[data-accept-drop]` (e.g. Studio, TreeView itself),
-  // add `drop-target-forbidden` to body so users see a "not-allowed" cursor
-  // instead of thinking the drop will work.
   useEffect(() => {
     const onDragEnterOver = (e: DragEvent) => {
       document.body.classList.toggle('drop-target-forbidden', !isAcceptDropTarget(e.target));
@@ -87,13 +80,12 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
     const onDragEnd = () => {
       document.body.classList.remove('drop-target-forbidden');
     };
-    // Only activate guard when a TreeView row starts being dragged.
     const onDragStart = (e: DragEvent) => {
       const tree = (e.target as HTMLElement)?.closest('.treeview');
-      if (!tree) return; // not from TreeView
+      if (!tree) return;
       document.addEventListener('dragenter', onDragEnterOver);
       document.addEventListener('dragover', onDragEnterOver);
-      document.addEventListener('dragleave', onDragEnd);  // reset on leave
+      document.addEventListener('dragleave', onDragEnd);
       document.addEventListener('drop', onDragEnd);
       document.addEventListener('dragend', onDragEnd, { once: true });
     };
@@ -109,7 +101,6 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
     };
   }, []);
 
-  // Find a node by path in the tree. Returns null if not found.
   const findNode = useCallback((n: Node, path: string): Node | null => {
     if (n.path === path) return n;
     for (const c of n.children ?? []) {
@@ -119,7 +110,6 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
     return null;
   }, []);
 
-  // Collect visible rows for a node's direct children (for incremental expand).
   function collectChildrenRows(parent: Node, out: VisibleRow[]) {
     const kids = parent.children;
     const showCount = Math.min(kids.length, CHILD_LIMIT);
@@ -139,17 +129,14 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
       if (wasOpen) next.delete(path);
       else next.add(path);
 
-      // Incremental flatRows update.
       setFlatRows((prev) => {
         const node = findNode(root, path);
         if (!node || !node.is_dir || node.children.length === 0) return prev;
 
-        // Find the index of the toggled row.
         const idx = prev.findIndex((r) => r.kind === 'node' && r.node.path === path);
         if (idx === -1) return prev;
 
         if (wasOpen) {
-          // Collapse: remove all descendant rows (depth > current until same or lesser depth).
           const currentDepth = (prev[idx] as NodeRow).depth;
           let end = idx + 1;
           while (end < prev.length) {
@@ -163,7 +150,6 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
           nextRows.splice(idx + 1, end - idx - 1);
           return nextRows;
         } else {
-          // Expand: insert children rows after the toggled row.
           const children: VisibleRow[] = [];
           collectChildrenRows(node, children);
           if (children.length === 0) return prev;
@@ -197,6 +183,66 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
     });
   }, []);
 
+  const activeRow = flatRows[activeIndex];
+  const activeId = activeRow?.kind === 'node' ? `tree-${activeRow.node.path}` : undefined;
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const max = flatRows.length - 1;
+    if (max < 0) return;
+
+    const row = flatRows[activeIndex];
+    const isNode = row?.kind === 'node';
+    const node = isNode ? (row as NodeRow).node : null;
+    const isDir = node?.is_dir ?? false;
+    const isOpen = node ? open.has(node.path) : false;
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setActiveIndex((i) => Math.min(i + 1, max));
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setActiveIndex((i) => Math.max(i - 1, 0));
+        break;
+      case 'ArrowRight':
+        if (isDir && !isOpen) {
+          e.preventDefault();
+          toggle(node!.path);
+        } else if (isDir && isOpen) {
+          e.preventDefault();
+          setActiveIndex((i) => Math.min(i + 1, max));
+        }
+        break;
+      case 'ArrowLeft':
+        if (isDir && isOpen) {
+          e.preventDefault();
+          toggle(node!.path);
+        }
+        break;
+      case 'Enter':
+      case ' ':
+        if (isNode) {
+          e.preventDefault();
+          onSelect(node!.path);
+        }
+        break;
+      case 'Home':
+        e.preventDefault();
+        setActiveIndex(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        setActiveIndex(max);
+        break;
+    }
+  }, [flatRows, activeIndex, open, toggle, onSelect]);
+
+  // Keep active row scrolled into view.
+  useEffect(() => {
+    listRef.current?.scrollToItem(activeIndex, 'smart');
+  }, [activeIndex]);
+
   const renderRow = useCallback(
     ({ index, style }: ListChildComponentProps) => {
       const row = flatRows[index];
@@ -210,26 +256,36 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
           style={style}
           isSelected={row.node.path === selectedPath}
           isOpen={open.has(row.node.path)}
+          isFocused={index === activeIndex}
           onSelect={onSelect}
           onToggle={toggle}
           onCtx={openCtx}
         />
       );
     },
-    [flatRows, selectedPath, open, onSelect, toggle, openCtx],
+    [flatRows, selectedPath, open, activeIndex, onSelect, toggle, openCtx],
   );
 
   return (
     <div className="treeview">
-      <div className="tree-headrow">
-        <div className="col-name">文件夹</div>
-        <div className="col-pct">父级 %</div>
-        <div className="col-size">大小</div>
-        <div className="col-count">项目</div>
+      <div className="tree-headrow" role="row">
+        <div className="col-name" role="columnheader">文件夹</div>
+        <div className="col-pct" role="columnheader">父级 %</div>
+        <div className="col-size" role="columnheader">大小</div>
+        <div className="col-count" role="columnheader">项目</div>
       </div>
-      <div className="tree-body" ref={bodyRef}>
+      <div
+        className="tree-body"
+        ref={bodyRef}
+        role="tree"
+        tabIndex={0}
+        aria-label="文件树"
+        aria-activedescendant={activeId}
+        onKeyDown={handleKeyDown}
+      >
         {size.height > 0 && size.width > 0 && (
           <FixedSizeList
+            ref={listRef}
             height={size.height}
             width={size.width}
             itemCount={flatRows.length}
@@ -250,20 +306,26 @@ type NodeRowViewProps = {
   style: CSSProperties;
   isSelected: boolean;
   isOpen: boolean;
+  isFocused: boolean;
   onSelect: (p: string) => void;
   onToggle: (p: string) => void;
   onCtx: (e: MouseEvent, node: Node) => void;
 };
 
 const NodeRowView = memo(function NodeRowView({
-  row, style, isSelected, isOpen, onSelect, onToggle, onCtx,
+  row, style, isSelected, isOpen, isFocused, onSelect, onToggle, onCtx,
 }: NodeRowViewProps) {
   const { node, parentSize, depth } = row;
   const hasKids = (node.children?.length ?? 0) > 0;
   const pct = parentSize > 0 ? (node.size / parentSize) * 100 : 0;
   return (
     <div
-      className={clsx('tree-row', isSelected && 'selected', !node.is_dir && 'is-file')}
+      id={`tree-${node.path}`}
+      role="treeitem"
+      aria-level={depth}
+      aria-selected={isSelected}
+      aria-expanded={hasKids ? isOpen : undefined}
+      className={clsx('tree-row', isSelected && 'selected', isFocused && 'focused', !node.is_dir && 'is-file')}
       style={style}
       onClick={() => onSelect(node.path)}
       onContextMenu={(e) => onCtx(e, node)}
@@ -307,7 +369,7 @@ type TruncatedRowViewProps = {
 
 const TruncatedRowView = memo(function TruncatedRowView({ row, style }: TruncatedRowViewProps) {
   return (
-    <div className="tree-row is-truncated" style={style}>
+    <div className="tree-row is-truncated" style={style} role="presentation">
       <div className="col-name" style={{ paddingLeft: 4 + row.depth * 14 }}>
         <span className="caret-stub" />
         <span className="name">… 还有 {formatCount(row.hidden)} 个未显示（Pinkbin 限制每层 {CHILD_LIMIT} 项）</span>
@@ -317,7 +379,6 @@ const TruncatedRowView = memo(function TruncatedRowView({ row, style }: Truncate
 });
 
 function FolderGlyph({ open }: { open: boolean }) {
-  // Windows-style yellow folder (closed/open variants).
   if (open) {
     return (
       <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>

@@ -7,15 +7,15 @@ pub mod providers;
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
 /// Simple in-memory response cache keyed by a hash of the serialized request.
 /// Prevents duplicate API calls for the same directory data within a session.
 const CACHE_CAP: usize = 64;
-static RESPONSE_CACHE: once_cell::sync::Lazy<Mutex<HashMap<u64, AdvisorResponse>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::with_capacity(CACHE_CAP)));
+static RESPONSE_CACHE: once_cell::sync::Lazy<RwLock<HashMap<u64, AdvisorResponse>>> =
+    once_cell::sync::Lazy::new(|| RwLock::new(HashMap::with_capacity(CACHE_CAP)));
 
 /// Shared HTTP client — reused across all advise() calls to avoid repeated
 /// DNS resolution, TLS handshakes, and connection pool rebuilds.
@@ -138,7 +138,7 @@ pub async fn advise(provider: &Provider, req: &AdvisorRequest) -> anyhow::Result
         h.finish()
     };
     {
-        let cache = RESPONSE_CACHE.lock().unwrap();
+        let cache = RESPONSE_CACHE.read().unwrap();
         if let Some(cached) = cache.get(&cache_key) {
             return Ok(cached.clone());
         }
@@ -170,7 +170,7 @@ pub async fn advise(provider: &Provider, req: &AdvisorRequest) -> anyhow::Result
             serde_json::from_str(&raw).or_else(|_| serde_json::from_str(strip_codefence(&raw)))?;
 
         // Cache successful responses (Issue 35).
-        let mut cache = RESPONSE_CACHE.lock().unwrap();
+        let mut cache = RESPONSE_CACHE.write().unwrap();
         cache.insert(cache_key, parsed.clone());
         if cache.len() > CACHE_CAP {
             cache.clear();

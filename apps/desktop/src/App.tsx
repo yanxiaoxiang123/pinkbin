@@ -15,6 +15,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { DiagnosticsBar } from './components/DiagnosticsBar';
 import { ToastContainer } from './components/Toast';
 import { formatBytes } from './format';
+import { t } from './messages';
 import { loadSettings, isConfiguredAsync, ADVISOR_KEY_ACCOUNT } from './advisorClient';
 import { ensureMigrated, getNumber, getJson, setJson, setNumber } from './persist';
 import { useScan } from './hooks/useScan';
@@ -37,6 +38,7 @@ export default function App() {
   const [pickedPath, setPickedPath] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [advisorTag, setAdvisorTag] = useState<{ provider: string } | null>(null);
+  const [appVersion, setAppVersion] = useState('');
   const [leftWidth, setLeftWidth] = useState<number>(() => {
     const v = getNumber('leftWidth', DEFAULT_LEFT);
     return v > MIN_LEFT ? v : DEFAULT_LEFT;
@@ -62,8 +64,8 @@ export default function App() {
           const remaining = (scanTotalBytes - scanProgress.bytes) / bps;
           if (remaining > 0) {
             text += remaining > 60
-              ? ` · 剩余 ${Math.ceil(remaining / 60)} 分`
-              : ` · 剩余 ${Math.ceil(remaining)}s`;
+              ? t('app.remainingMin', { n: Math.ceil(remaining / 60) })
+              : t('app.remainingSec', { n: Math.ceil(remaining) });
           }
         }
         setScanEta(text);
@@ -74,7 +76,8 @@ export default function App() {
     }
   }, [scanning, scanProgress, scanTotalBytes]);
 
-  useEffect(() => { api.listScaffolds().then(setScaffolds).catch(() => {}); }, [setScaffolds]);
+  useEffect(() => { api.listScaffolds().then(setScaffolds).catch((e) => console.warn('listScaffolds failed:', e)); }, [setScaffolds]);
+  useEffect(() => { api.getAppVersion().then(setAppVersion).catch(() => {}); }, []);
 
   // One-shot migration: if the user upgraded from a version that stored
   // the key in localStorage, lift it into the OS credential manager and
@@ -126,7 +129,7 @@ export default function App() {
 
   const pickDirectory = async () => {
     if (!isTauri) {
-      const p = window.prompt('浏览器预览模式：输入一个路径（任意值都可以）', 'C:\\');
+      const p = window.prompt(t('app.browserPrompt'), 'C:\\');
       if (p) setPickedPath(p);
       return;
     }
@@ -139,31 +142,31 @@ export default function App() {
       <header>
         <span className="brand"><Logo size={22} /> Pinkbin</span>
         <button className="ghost" onClick={pickDirectory}>
-          <Folder size={14} /> {pickedPath || '选择磁盘或文件夹'}
+          <Folder size={14} /> {pickedPath || t('app.pickDir')}
         </button>
         <button className="primary" onClick={scan} disabled={!pickedPath || scanning}>
-          <ScanLine size={14} /> {scanning ? '扫描中…' : '扫描'}
+          <ScanLine size={14} /> {scanning ? t('app.scanning') : t('app.scan')}
         </button>
         {scanning && (
-          <button className="ghost danger" onClick={cancel} title="取消扫描">
-            <StopCircle size={14} /> 取消
+          <button className="ghost danger" onClick={cancel} title={t('app.cancelScanTitle')}>
+            <StopCircle size={14} /> {t('app.cancelScan')}
           </button>
         )}
         <div className="grow" />
         <span className="muted small">
-          {root ? `${formatBytes(root.size)} · ${root.file_count.toLocaleString()} 文件` : '未扫描'}
+          {root ? `${formatBytes(root.size)} · ${root.file_count.toLocaleString()} ${t('app.files')}` : t('app.notScanned')}
         </span>
         <button
           className={clsx('ghost icon settings-btn', advisorTag && 'bound')}
           onClick={() => setShowSettings(true)}
-          title={advisorTag ? `已绑定 ${advisorTag.provider} · 点开管理` : 'AI 还没配置 · 点开设置'}
-          aria-label="设置"
+          title={advisorTag ? t('app.settingsBound', { provider: advisorTag.provider }) : t('app.settingsUnbound')}
+          aria-label={t('app.settingsLabel')}
         >
           <SettingsIcon size={16} />
           {advisorTag && <span className="settings-dot" />}
         </button>
         {advisorTag && (
-          <span className="provider-pill" title="当前 AI 提供商">
+          <span className="provider-pill" title={t('app.currentProvider')}>
             {advisorTag.provider}
           </span>
         )}
@@ -185,7 +188,7 @@ export default function App() {
           <div className="scan-bar-label">
             {scanProgress
               ? `${scanProgress.files.toLocaleString()} 个文件 · ${formatBytes(scanTotalBytes ? Math.min(scanProgress.bytes, scanTotalBytes) : scanProgress.bytes)}${scanTotalBytes ? ` / ${formatBytes(scanTotalBytes)}` : ''}${scanEta ? ` · ${scanEta}` : ''}`
-              : '准备扫描…'}
+              : t('app.preparing')}
           </div>
         </div>
       )}
@@ -206,15 +209,15 @@ export default function App() {
         <Splitter onDrag={dragRight} onDragEnd={saveRightWidth} onDoubleClick={() => { setRightWidth(DEFAULT_RIGHT); setNumber('rightWidth', DEFAULT_RIGHT); }} />
 
         <aside className="right">
-          <ErrorBoundary fallbackLabel="Studio 面板渲染失败">
+          <ErrorBoundary fallbackLabel={t('error.renderFail')}>
             <Studio />
           </ErrorBoundary>
         </aside>
       </main>
 
       <footer>
-        <span>Pinkbin v0.1.1 · {scaffolds.length} 个清理脚本</span>
-        <span>{root?.path ?? '还没扫描'}</span>
+        <span>{t('app.version', { version: appVersion || '…', n: scaffolds.length })}</span>
+        <span>{root?.path ?? t('app.noScan')}</span>
       </footer>
 
       {showSettings && <Settings onClose={() => { setShowSettings(false); refreshAdvisorTag(); }} />}
@@ -227,8 +230,8 @@ export default function App() {
 function EmptyLeft() {
   return (
     <div className="empty">
-      <div className="empty-title">还没扫描</div>
-      <div className="empty-sub">在顶栏选一个文件夹，然后点「扫描」。<br />扫完之后，左侧会列出每个文件夹和文件。</div>
+      <div className="empty-title">{t('app.emptyTitle')}</div>
+      <div className="empty-sub">{t('app.emptyHint').split('\n').map((line, i, arr) => <>{line}{i < arr.length - 1 && <br />}</>)}</div>
     </div>
   );
 }

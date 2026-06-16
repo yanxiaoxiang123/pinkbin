@@ -30,6 +30,8 @@ export interface ChatSlice {
   setAdvisorReady: (b: boolean) => void;
 }
 
+const MAX_CHAT_TURNS = 50;
+
 export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set, get) => ({
   chatNode: null,
   chatScaffoldId: null,
@@ -40,7 +42,10 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   advisorReady: false,
   focusChatOn: (node, scaffoldId) =>
     set({ chatNode: node, chatScaffoldId: scaffoldId }),
-  pushChatTurn: (t) => set((s) => ({ chatTurns: [...s.chatTurns, t] })),
+  pushChatTurn: (t) => set((s) => {
+    const next = [...s.chatTurns, t];
+    return { chatTurns: next.length > MAX_CHAT_TURNS ? next.slice(-MAX_CHAT_TURNS) : next };
+  }),
   patchChatTurn: (id, patch) =>
     set((s) => ({
       chatTurns: s.chatTurns.map((t) => (t.id === id ? { ...t, ...patch } : t)),

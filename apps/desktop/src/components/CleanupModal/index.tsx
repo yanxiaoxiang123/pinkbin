@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import FocusTrap from 'focus-trap-react';
 import { X, Trash2, Loader2, AlertTriangle } from 'lucide-react';
-import { api } from '../../api';
+import { api, errorMessage } from '../../api';
 import { formatBytes } from '../../format';
 import type { Node, Scaffold, CondaEnv, ScopeSize } from '../../types';
 import { CondaPicker } from './CondaPicker';
@@ -131,7 +131,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
         setCondaEnvs(envs);
         setSelectedEnvs(new Set(envs.filter((e) => e.default_checked).map((e) => e.name)));
       })
-      .catch((e) => { if (!cancelled) setErr(`读取 conda env 失败：${String(e)}`); })
+      .catch((e) => { if (!cancelled) setErr(`读取 conda env 失败：${errorMessage(e)}`); })
       .finally(() => { if (!cancelled) setCondaEnvsLoading(false); });
     return () => { cancelled = true; };
   }, [isConda, matchKey, matches, setCondaEnvs, setSelectedEnvs, setCondaEnvsLoading, setErr]);
@@ -306,7 +306,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
         truncated: totalFiles > samplePaths.length,
       });
     } catch (e) {
-      setErr(`预览失败：${String(e)}`);
+      setErr(`预览失败：${errorMessage(e)}`);
     } finally {
       setPreviewing(false);
     }
@@ -367,7 +367,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
       setMsg(`已清理 ${totalEntries} 个文件 · 约 ${formatBytes(preview.totalBytes)} · 进了系统回收站`);
       setPreview(null);
     } catch (e) {
-      setErr(`清理失败：${String(e)}`);
+      setErr(`清理失败：${errorMessage(e)}`);
       throw e;
     } finally {
       jobIdRef.current = null;

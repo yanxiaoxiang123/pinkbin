@@ -177,7 +177,7 @@ where
     };
     let total_t0 = Instant::now();
     let mut stats = ScanStats::default();
-    tracing::info!("scan: start root={:?}", root);
+    tracing::debug!("scan: start root={:?}", root);
 
     // Try the MFT fast path on Windows when the root is on an NTFS volume.
     #[cfg(windows)]

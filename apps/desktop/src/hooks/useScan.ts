@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { api } from '../api';
+import { api, errorMessage } from '../api';
 import { isTauri } from '../env';
 import { useStore } from '../store';
 
@@ -151,7 +151,7 @@ export function useScan(pickedPath: string) {
       });
     } catch (e) {
       if (activeScanId.current !== scanId) return; // cancelled or superseded
-      const msg = String(e);
+      const msg = errorMessage(e);
       if (msg.includes('scan_cancelled')) return; // user-initiated, not an error
       setErr(msg);
     } finally {

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import FocusTrap from 'focus-trap-react';
 import { X, CheckCircle2, Info, Eye, EyeOff } from 'lucide-react';
-import { api } from '../api';
+import { api, errorMessage } from '../api';
+import { t } from '../messages';
 import { isTauri } from '../env';
 import { useStore } from '../store';
 import {
@@ -69,9 +70,9 @@ export function Settings({ onClose }: Props) {
 
   const save = async () => {
     setErr(null); setMsg(null);
-    if (!baseUrl.trim()) { setErr('请填 Base URL'); return; }
-    if (!model.trim())   { setErr('请填 Model 名'); return; }
-    if (needsKey && !apiKey.trim()) { setErr('请填 API Key'); return; }
+    if (!baseUrl.trim()) { setErr(t('settings.err.baseUrl')); return; }
+    if (!model.trim())   { setErr(t('settings.err.model')); return; }
+    if (needsKey && !apiKey.trim()) { setErr(t('settings.err.apiKey')); return; }
     try {
       // Non-secret config (provider/model/baseUrl) goes to localStorage so
       // it survives reload without an OS keychain round-trip on startup.
@@ -87,11 +88,11 @@ export function Settings({ onClose }: Props) {
       if (isTauri) {
         await api.setAdvisor(provider, model, baseUrl);
       }
-      setMsg('已保存 · key 只存在你本机系统钥匙串 (Credential Manager / Keychain / libsecret)');
+      setMsg(t('settings.saved'));
       setSaved(true);
       useStore.getState().setAdvisorReady(true);
     } catch (e) {
-      setErr(String(e));
+      setErr(errorMessage(e));
     }
   };
 
@@ -107,7 +108,7 @@ export function Settings({ onClose }: Props) {
     setModel('');
     setAdvanced({ ...DEFAULT_ADVANCED });
     setSaved(false);
-    setMsg('已清除本地保存的配置和钥匙串里的 key');
+    setMsg(t('settings.wiped'));
     useStore.getState().setAdvisorReady(false);
   };
 
@@ -122,7 +123,7 @@ export function Settings({ onClose }: Props) {
           onClick={(e) => e.stopPropagation()}
         >
         <div className="modal-head">
-          <div>AI 顾问设置 {saved && <CheckCircle2 size={16} style={{ verticalAlign: 'middle', marginLeft: 6, color: 'var(--pink-deep)' }} />}</div>
+          <div>{t('settings.title')} {saved && <CheckCircle2 size={16} style={{ verticalAlign: 'middle', marginLeft: 6, color: 'var(--pink-deep)' }} />}</div>
           <button className="ghost icon" onClick={onClose}><X size={16} /></button>
         </div>
 
@@ -136,10 +137,10 @@ export function Settings({ onClose }: Props) {
         ) : (
           <><p className="hint">
           <Info size={12} />
-          <span>填你服务商给你的 Base URL、API Key 和模型名。先选协议再填地址，省得猜错。</span>
+          <span>{t('settings.hint')}</span>
         </p>
         <label className="field">
-          <span>协议 · Provider</span>
+          <span>{t('settings.protocol')}</span>
           <div className="provider-radio-group">
             {(['openai', 'anthropic', 'gemini', 'ollama'] as const).map((p) => (
               <label key={p} className="provider-radio">
@@ -151,16 +152,16 @@ export function Settings({ onClose }: Props) {
                   onChange={() => setProvider(p)}
                   disabled={!loaded}
                 />
-                <span>{p === 'openai' ? 'OpenAI' : p === 'anthropic' ? 'Anthropic' : p === 'gemini' ? 'Gemini' : 'Ollama（本地）'}</span>
+                <span>{p === 'openai' ? t('settings.openai') : p === 'anthropic' ? t('settings.anthropic') : p === 'gemini' ? t('settings.gemini') : t('settings.ollama')}</span>
               </label>
             ))}
           </div>
           {suggested && suggested !== provider && (
-            <p className="provider-hint">我们猜你是 <strong>{suggested}</strong> — 如果不对，点上面切换。</p>
+            <p className="provider-hint">{t('settings.suggested', { provider: suggested })}</p>
           )}
         </label>
         <label className="field">
-          <span>Base URL</span>
+          <span>{t('settings.baseUrl')}</span>
           <input
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
@@ -171,7 +172,7 @@ export function Settings({ onClose }: Props) {
 
         {needsKey && (
           <label className="field">
-            <span>API Key（只存本机，永不上传）</span>
+            <span>{t('settings.apiKey')}</span>
             <div style={{ display: 'flex', gap: 6 }}>
               <input
                 type={showKey ? 'text' : 'password'}
@@ -185,7 +186,7 @@ export function Settings({ onClose }: Props) {
                 type="button"
                 className="ghost icon"
                 onClick={() => setShowKey((v) => !v)}
-                title={showKey ? '隐藏' : '显示'}
+                title={showKey ? t('settings.hide') : t('settings.show')}
               >
                 {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
               </button>
@@ -194,7 +195,7 @@ export function Settings({ onClose }: Props) {
         )}
 
         <label className="field">
-          <span>Model · 模型名</span>
+          <span>{t('settings.model')}</span>
           <input
             value={model}
             onChange={(e) => setModel(e.target.value)}
@@ -209,14 +210,14 @@ export function Settings({ onClose }: Props) {
             className="ghost"
             onClick={() => setShowAdvanced((v) => !v)}
           >
-            {showAdvanced ? '▾ 高级设置' : '▸ 高级设置'}
+            {showAdvanced ? t('settings.advanced.close') : t('settings.advanced.open')}
           </button>
         </div>
 
         {showAdvanced && (
           <div className="settings-advanced-panel">
             <label className="field">
-              <span>Temperature（创造性 0–2）</span>
+              <span>{t('settings.temperature')}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input
                   type="range"
@@ -232,7 +233,7 @@ export function Settings({ onClose }: Props) {
             </label>
 
             <label className="field">
-              <span>Max Tokens（回复长度上限）</span>
+              <span>{t('settings.maxTokens')}</span>
               <input
                 type="number"
                 min={256}
@@ -244,26 +245,30 @@ export function Settings({ onClose }: Props) {
             </label>
 
             <label className="field">
-              <span>Streaming（逐字输出）</span>
+              <span>{t('settings.streaming')}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input
                   type="checkbox"
                   checked={advanced.stream}
                   onChange={(e) => setAdvanced((a) => ({ ...a, stream: e.target.checked }))}
                 />
-                <span className="muted small">{advanced.stream ? '开启' : '关闭（一次性返回）'}</span>
+                <span className="muted small">{advanced.stream ? t('settings.streamOn') : t('settings.streamOff')}</span>
               </div>
             </label>
 
             <label className="field">
-              <span>System Prompt Override（留空用默认）</span>
+              <span>{t('settings.promptOverride')}</span>
               <textarea
                 value={advanced.systemPromptOverride}
                 onChange={(e) => setAdvanced((a) => ({ ...a, systemPromptOverride: e.target.value }))}
-                placeholder="留空 = 使用内置 prompt"
+                placeholder={t('settings.promptPlaceholder')}
                 rows={4}
+                maxLength={4000}
                 style={{ resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 12 }}
               />
+              <span className="muted small" style={{ textAlign: 'right' }}>
+                {advanced.systemPromptOverride.length} / 4000
+              </span>
             </label>
 
             <button
@@ -272,7 +277,7 @@ export function Settings({ onClose }: Props) {
               onClick={() => setAdvanced({ ...DEFAULT_ADVANCED })}
               style={{ fontSize: 11 }}
             >
-              恢复默认
+              {t('settings.resetDefault')}
             </button>
           </div>
         )}
@@ -281,9 +286,9 @@ export function Settings({ onClose }: Props) {
         {err && <div className="error">{err}</div>}
 
         <div className="modal-actions">
-          {saved && <button className="ghost" onClick={wipe}>清除</button>}
-          <button className="primary" onClick={save}>保存</button>
-          <button className="ghost" onClick={onClose} aria-label="关闭">关闭</button>
+          {saved && <button className="ghost" onClick={wipe}>{t('settings.clear')}</button>}
+          <button className="primary" onClick={save}>{t('settings.save')}</button>
+          <button className="ghost" onClick={onClose} aria-label={t('settings.close')}>{t('settings.close')}</button>
         </div>
 
         <p className="muted small" style={{ marginTop: 4 }}>

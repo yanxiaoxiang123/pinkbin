@@ -611,6 +611,7 @@ footer {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .spin,
   .scan-bar-fill.indeterminate { animation: none !important; }
 }
 
@@ -879,6 +880,9 @@ footer {
 
 /* ── Drop-target guard ────────────────────────────────────── */
 .drop-target-forbidden,
-.drop-target-forbidden * { cursor: not-allowed !important; }
+.drop-target-forbidden a,
+.drop-target-forbidden button,
+.drop-target-forbidden input,
+.drop-target-forbidden [draggable] { cursor: not-allowed !important; }
 
 ::selection { background: var(--primary); color: var(--on-primary); }

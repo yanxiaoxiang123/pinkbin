@@ -159,7 +159,7 @@
 .steam-empty-state code { font-family: var(--font-mono); font-size: 12px; background: var(--paper-2); padding: 1px 6px; border-radius: 4px; }
 .steam-path-list { list-style: none; padding: 0; margin: 0 0 12px; display: flex; flex-direction: column; gap: 4px; }
 .steam-path-list li { font-family: var(--font-mono); font-size: 11.5px; padding: 6px 10px; background: var(--paper-2); border-radius: 6px; color: var(--ink-2); }
-.steam-empty-hint { color: var(--ink-3) !important; font-size: 12px !important; }
+.steam-empty-hint { color: var(--ink-3); font-size: 12px; }
 
 .steam-toast { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; background: var(--ink); color: var(--paper); border-radius: 10px; font-size: 12px; font-weight: 500; box-shadow: var(--shadow-sm); animation: toast-pop 0.18s ease-out; pointer-events: none; z-index: 100; white-space: nowrap; max-width: 80%; }
 @keyframes toast-pop { from { transform: translate(-50%, 6px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }

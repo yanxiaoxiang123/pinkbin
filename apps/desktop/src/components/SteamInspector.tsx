@@ -12,9 +12,9 @@ import {
   Boxes,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { api } from '../api';
+import { api, errorMessage } from '../api';
 import type { SteamGame, SteamInventory } from '../types';
-import { formatBytes } from '../format';
+import { formatBytes, relativeTime, absoluteTime } from '../format';
 import { SteamWorkshopModal } from './SteamWorkshopModal';
 
 type Pivot = 'sleep' | 'size' | 'library' | 'lastplayed';
@@ -28,28 +28,6 @@ const PIVOT_LABELS: Record<Pivot, string> = {
 
 const PIVOT_ORDER: Pivot[] = ['sleep', 'size', 'library', 'lastplayed'];
 
-function relativeTime(ts: number | null): string {
-  if (ts == null) return '从未启动';
-  const now = Date.now() / 1000;
-  const diff = now - ts;
-  if (diff < 0) return '刚刚';
-  const day = 86400;
-  const month = day * 30.4375;
-  const year = month * 12;
-  if (diff < day) return '今天';
-  if (diff < 2 * day) return '昨天';
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
-  if (diff < month) return `${Math.floor(diff / day / 7)} 周前`;
-  if (diff < 2 * month) return '上月';
-  if (diff < year) return `${Math.floor(diff / month)} 个月前`;
-  return `${Math.floor(diff / year)} 年前`;
-}
-
-function absoluteTime(ts: number | null): string {
-  if (ts == null) return '从未启动';
-  const d = new Date(ts * 1000);
-  return d.toISOString().slice(0, 10);
-}
 
 function sleepScore(g: SteamGame): number {
   if (g.is_ghost) return Number.POSITIVE_INFINITY;
@@ -123,7 +101,7 @@ export function SteamInspector() {
         setEnabledLibraries(new Set(inv.libraries.map((l) => l.root)));
       })
       .catch((e) => {
-        setError(String(e));
+        setError(errorMessage(e));
         setLoading(false);
       });
   }, []);
@@ -170,7 +148,7 @@ export function SteamInspector() {
       try {
         await api.revealInExplorer(g.appmanifest_path);
       } catch (e) {
-        showToast(`打不开：${String(e)}`);
+        showToast(`打不开：${errorMessage(e)}`);
       }
     },
     [],
@@ -185,7 +163,7 @@ export function SteamInspector() {
         showToast('如果 Steam 没弹出来，请确认 Steam 客户端正在运行');
       }, 800);
     } catch (e) {
-      showToast(`唤起 Steam 失败：${String(e)}`);
+      showToast(`唤起 Steam 失败：${errorMessage(e)}`);
     }
   }, []);
 

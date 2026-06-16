@@ -3,7 +3,7 @@ import clsx from 'clsx';
 import { ChevronRight, ChevronDown, Sparkles, MessageSquare, Trash2, FolderOpen, Copy, ExternalLink, Gamepad2, ArchiveX, Undo2 } from 'lucide-react';
 import { useStore } from '../store';
 import { formatBytes } from '../format';
-import { api } from '../api';
+import { api, errorMessage } from '../api';
 import type { Node, Scaffold } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ContextMenu, type ContextMenuState } from './ContextMenu';
@@ -71,7 +71,7 @@ export function Studio() {
           : 'quarantine 目录没有过期文件'
       );
     } catch (e) {
-      setPruneMsg(`清理失败：${String(e)}`);
+      setPruneMsg(`清理失败：${errorMessage(e)}`);
     } finally {
       setPruneLoading(false);
     }

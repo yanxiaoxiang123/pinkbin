@@ -1,8 +1,12 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, memo, useEffect, useRef, useState } from 'react';
 import { Send, Trash2, ShieldCheck, ShieldAlert, ShieldX, X, MessageSquare, Sparkles, Folder, File, ImagePlus } from 'lucide-react';
 import clsx from 'clsx';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+
+const MarkdownRenderer = lazy(() =>
+  Promise.all([import('react-markdown'), import('remark-gfm')]).then(
+    ([md, gfm]) => ({ default: (props: { children: string }) => <md.default remarkPlugins={[gfm.default]}>{props.children}</md.default> })
+  )
+);
 import { isTauri } from '../env';
 import { useStore } from '../store';
 import { formatBytes } from '../format';
@@ -272,7 +276,7 @@ const TurnBubble = memo(function TurnBubble({
       {role === 'assistant' && advice && <AdviceCard advice={advice} />}
       <div className="chat-bubble">
         {role === 'assistant'
-          ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+          ? <Suspense fallback={text}><MarkdownRenderer>{text}</MarkdownRenderer></Suspense>
           : text}
       </div>
       {role === 'assistant' && advice?.action === 'recycle' && !advice?.needs_inspection && !advice?.is_fallback && node && (

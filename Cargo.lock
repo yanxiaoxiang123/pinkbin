@@ -2767,7 +2767,6 @@ dependencies = [
  "chrono",
  "globset",
  "include_dir",
- "jwalk",
  "pinkbin-advisor",
  "pinkbin-executor",
  "pinkbin-scaffold",

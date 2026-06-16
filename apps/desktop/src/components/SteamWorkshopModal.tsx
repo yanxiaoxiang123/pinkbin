@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { X, Boxes, RefreshCw, ExternalLink, RotateCcw } from 'lucide-react';
-import { api } from '../api';
+import { api, errorMessage } from '../api';
 import type { SteamGame, WorkshopItem } from '../types';
-import { formatBytes } from '../format';
+import { formatBytes, relativeTime } from '../format';
 import { getJson, setJson } from '../persist';
 
 /// localStorage cache keyed by stringified item ID. Workshop titles are
@@ -23,8 +23,17 @@ function readTitleCache(): Record<number, string> {
   return out;
 }
 
+const TITLE_CACHE_CAP = 10_000;
+
 function writeTitleCache(titles: Record<number, string>) {
-  setJson('workshopTitles', titles);
+  const entries = Object.entries(titles);
+  if (entries.length > TITLE_CACHE_CAP) {
+    // Drop oldest entries (earliest keys by insertion order).
+    const trimmed = Object.fromEntries(entries.slice(entries.length - TITLE_CACHE_CAP));
+    setJson('workshopTitles', trimmed);
+  } else {
+    setJson('workshopTitles', titles);
+  }
 }
 
 /// Modal listing one game's installed Steam Workshop items. Lazily-loaded
@@ -76,7 +85,7 @@ export function SteamWorkshopModal({
       } catch (e) {
         // Show cached results regardless; surface only the missing-fetch error.
         setTitles(cached);
-        setTitlesError(String(e));
+        setTitlesError(errorMessage(e));
       } finally {
         setTitlesLoading(false);
       }
@@ -103,7 +112,7 @@ export function SteamWorkshopModal({
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(String(e));
+        setError(errorMessage(e));
         setLoading(false);
       });
     return () => {
@@ -251,7 +260,7 @@ function WorkshopRow({ item, title }: { item: WorkshopItem; title?: string }) {
             <div className="steam-workshop-item-title">{title}</div>
             <div className="steam-workshop-item-meta">
               <span className="steam-workshop-item-id-secondary">#{item.id}</span>
-              <span className="steam-workshop-item-time">{relativeTime(item.last_modified_ts)}</span>
+              <span className="steam-workshop-item-time">{relativeTime(item.last_modified_ts, '更新')}</span>
               <span className="steam-workshop-item-size">{formatBytes(item.size_bytes)}</span>
             </div>
           </>
@@ -259,7 +268,7 @@ function WorkshopRow({ item, title }: { item: WorkshopItem; title?: string }) {
           <>
             <div className="steam-workshop-item-id">#{item.id}</div>
             <div className="steam-workshop-item-meta">
-              <span className="steam-workshop-item-time">{relativeTime(item.last_modified_ts)}</span>
+              <span className="steam-workshop-item-time">{relativeTime(item.last_modified_ts, '更新')}</span>
               <span className="steam-workshop-item-size">{formatBytes(item.size_bytes)}</span>
             </div>
           </>
@@ -275,19 +284,4 @@ function WorkshopRow({ item, title }: { item: WorkshopItem; title?: string }) {
       </button>
     </li>
   );
-}
-
-function relativeTime(ts: number): string {
-  if (ts === 0) return '未知';
-  const now = Date.now() / 1000;
-  const diff = now - ts;
-  const day = 86400;
-  const month = day * 30.4375;
-  const year = month * 12;
-  if (diff < 0) return '刚刚';
-  if (diff < day) return '今天更新';
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前更新`;
-  if (diff < month) return `${Math.floor(diff / day / 7)} 周前更新`;
-  if (diff < year) return `${Math.floor(diff / month)} 个月前更新`;
-  return `${Math.floor(diff / year)} 年前更新`;
 }

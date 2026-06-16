@@ -30,7 +30,7 @@ export function ToastContainer() {
   const toasts = useStore((s) => s.toasts);
   if (toasts.length === 0) return null;
   return (
-    <div className="toast-container">
+    <div className="toast-container" role="status" aria-live="polite">
       {toasts.map((t) => (
         <ToastItem key={t.id} id={t.id} text={t.text} type={t.type} />
       ))}

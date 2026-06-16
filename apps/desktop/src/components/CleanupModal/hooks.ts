@@ -4,7 +4,7 @@
 // change.
 
 import { useEffect, useState } from 'react';
-import { api } from '../../api';
+import { api, errorMessage } from '../../api';
 import { getJson, setJson } from '../../persist';
 import type { Node, ScopeSize } from '../../types';
 
@@ -134,7 +134,7 @@ export function useScopeSizes(
           if (cancelled) return;
           setSizes(aggregateScopeSizes(rowsList));
         })
-        .catch((e) => { if (!cancelled) setError(`扫描 scope 大小失败：${String(e)}`); })
+        .catch((e) => { if (!cancelled) setError(`扫描 scope 大小失败：${errorMessage(e)}`); })
         .finally(() => { if (!cancelled) setLoading(false); });
     }, 300);
     return () => { cancelled = true; window.clearTimeout(timer); };

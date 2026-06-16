@@ -1,4 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
+
+/** Extract a human-readable message from a Tauri command error.
+ *  Commands now return `Result<T, CommandError>` which serializes as
+ *  `{ kind, message }`.  The frontend historically used `String(e)` on
+ *  raw-string errors; this helper bridges both shapes. */
+export function errorMessage(e: unknown): string {
+  if (typeof e === 'string') return e;
+  if (e && typeof e === 'object' && 'message' in e) return String((e as { message: unknown }).message);
+  return String(e);
+}
+
 import type {
   Node,
   Scaffold,
@@ -12,7 +23,10 @@ import type {
   WorkshopItem,
 } from './types';
 import { isTauri } from './env';
-import * as mocks from './mocks';
+
+// Lazy-loaded only in browser mode — Vite code-splits this into a separate
+// chunk that is never fetched in Tauri production builds.
+const getMocks = () => import('./mocks');
 
 type VolumeInfo = { total_bytes: number; used_bytes: number; free_bytes: number };
 type AdvisorProvider = 'openai' | 'anthropic' | 'gemini' | 'ollama';
@@ -24,6 +38,7 @@ type SteamUrlAction = 'uninstall' | 'rungameid' | 'validate' | 'nav' | 'workshop
 const tauri = {
   scan: (path: string, scanId?: string) => invoke<Node>('scan_path', { path, scanId: scanId ?? null }),
   listScaffolds: () => invoke<Scaffold[]>('list_scaffolds'),
+  getAppVersion: () => invoke<string>('get_app_version'),
   scopeSizes: (scaffoldId: string, rootPath: string, scopeDays?: Record<string, number>, wxidFilter?: string[], envFilter?: string[]) =>
     invoke<ScopeSize[]>('scope_sizes', { scaffoldId, rootPath, scopeDays: scopeDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
   executeScope: (scaffoldId: string, scopeId: string, rootPath: string, dryRun: boolean, olderThanDays?: number, wxidFilter?: string[], envFilter?: string[], jobId?: string) =>
@@ -75,20 +90,18 @@ const tauri = {
 const browserSecretStore: Map<string, string> = new Map();
 
 const browser = {
-  scan: (_path: string, _scanId?: string) => mocks.scan(_path),
-  listScaffolds: () => Promise.resolve(mocks.SCAFFOLDS),
-  scopeSizes: (_scaffoldId: string, _rootPath: string, _scopeDays?: Record<string, number>, _wxidFilter?: string[], _envFilter?: string[]) =>
-    mocks.scopeSizes(_scaffoldId, _rootPath),
+  scan: async (_path: string, _scanId?: string) => (await getMocks()).scan(_path),
+  listScaffolds: async () => (await getMocks()).SCAFFOLDS,
+  getAppVersion: () => Promise.resolve('0.0.0'),
+  scopeSizes: async (_scaffoldId: string, _rootPath: string, _scopeDays?: Record<string, number>, _wxidFilter?: string[], _envFilter?: string[]) =>
+    (await getMocks()).scopeSizes(_scaffoldId, _rootPath),
   executeScope: (_scaffoldId: string, _scopeId: string, _rootPath: string, _dryRun: boolean, _olderThanDays?: number, _wxidFilter?: string[], _envFilter?: string[]) =>
     Promise.resolve([] as UndoEntry[]),
   listCondaEnvs: (_condaRoot: string) => Promise.resolve([] as CondaEnv[]),
-  advise: (req: AdvisorRequest) => mocks.advise(req),
-  inspect: (path: string, sampleCount: number) => mocks.inspect(path, sampleCount),
+  advise: async (req: AdvisorRequest) => (await getMocks()).advise(req),
   revealInExplorer: () => Promise.resolve(),
   setAdvisor: (_provider: AdvisorProvider, _model: string, _baseUrl?: string) => Promise.resolve(),
   storeSecret: (_account: string, secret: string) => {
-    // No-op if the caller doesn't pass an account (shouldn't happen in
-    // practice). We use a singleton account name in browser mode.
     browserSecretStore.set('pinkbin:advisor-key', secret);
     return Promise.resolve();
   },
@@ -98,13 +111,13 @@ const browser = {
     browserSecretStore.delete('pinkbin:advisor-key');
     return Promise.resolve();
   },
-  execute: (_scaffoldId: string, _scopeId: string, paths: string[], reason: string, _dryRun: boolean) =>
-    mocks.execute(_scaffoldId, _scopeId, paths, reason, _dryRun),
-  findScopeForPath: (path: string) => mocks.findScopeForPath(path),
+  execute: async (_scaffoldId: string, _scopeId: string, paths: string[], reason: string, _dryRun: boolean) =>
+    (await getMocks()).execute(_scaffoldId, _scopeId, paths, reason, _dryRun),
+  findScopeForPath: async (path: string) => (await getMocks()).findScopeForPath(path),
   volumeInfo: () => Promise.resolve(null),
-  listSteamGames: () => Promise.resolve(mocks.STEAM_INVENTORY),
-  listSteamWorkshopItems: (_libraryRoot: string, appid: number) => Promise.resolve(mocks.steamWorkshopItems(appid)),
-  fetchWorkshopTitles: (ids: number[]) => Promise.resolve(mocks.workshopTitles(ids)),
+  listSteamGames: async () => (await getMocks()).STEAM_INVENTORY,
+  listSteamWorkshopItems: async (_libraryRoot: string, appid: number) => (await getMocks()).steamWorkshopItems(appid),
+  fetchWorkshopTitles: async (ids: number[]) => (await getMocks()).workshopTitles(ids),
   openSteamUrl: () => Promise.resolve(),
   cancelJob: (_jobId: string) => Promise.resolve(),
   pruneQuarantine: (_ttlDays: number) => Promise.resolve({ removed_count: 0, removed_bytes: 0 }),

@@ -67,7 +67,7 @@ impl From<String> for CommandError {
     fn from(s: String) -> Self {
         // Heuristic: classify common error substrings. This is intentionally
         // lossy — the enum is the preferred path, this is a compat shim for
-        // the many `.map_err(|e| e.to_string())` call sites.
+        // the many `.map_err(CommandError::from)` call sites.
         let lower = s.to_lowercase();
         if lower.contains("not found") || lower.contains("does not exist") {
             Self::NotFound(s)
@@ -84,6 +84,30 @@ impl From<String> for CommandError {
 impl From<anyhow::Error> for CommandError {
     fn from(e: anyhow::Error) -> Self {
         Self::from(e.to_string())
+    }
+}
+
+impl From<tokio::task::JoinError> for CommandError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for CommandError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e.to_string())
+    }
+}
+
+impl From<globset::Error> for CommandError {
+    fn from(e: globset::Error) -> Self {
+        Self::InvalidInput(e.to_string())
+    }
+}
+
+impl From<&str> for CommandError {
+    fn from(s: &str) -> Self {
+        Self::from(s.to_string())
     }
 }
 
@@ -120,7 +144,7 @@ async fn scan_path(
     state: State<'_, AppState>,
     path: String,
     scan_id: Option<String>,
-) -> Result<Node, String> {
+) -> Result<Node, CommandError> {
     let p = PathBuf::from(&path);
     let app_for_progress = app.clone();
     let app_for_stats = app.clone();
@@ -177,7 +201,7 @@ async fn scan_path(
         })
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(CommandError::from)?;
 
     // Clean up the jobs map entry.
     if let Some(sid) = &scan_id {
@@ -206,7 +230,7 @@ async fn scan_path(
                 // Emit a final "cancelled" status so the frontend can react.
                 let _ = app_for_stats.emit("scan-cancelled", ());
             }
-            Err(msg)
+            Err(msg.into())
         }
     }
 }
@@ -299,6 +323,11 @@ async fn list_scaffolds(state: State<'_, AppState>) -> Result<Vec<Scaffold>, Com
     Ok(state.scaffolds.read().unwrap().clone())
 }
 
+#[tauri::command]
+fn get_app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 
 #[derive(serde::Serialize, Clone)]
 struct VolumeInfo {
@@ -308,7 +337,7 @@ struct VolumeInfo {
 }
 
 #[tauri::command]
-fn volume_info(path: String) -> Result<VolumeInfo, String> {
+fn volume_info(path: String) -> Result<VolumeInfo, CommandError> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -378,7 +407,7 @@ struct ScopeSize {
 /// `wxid_*` segment always pass. `None` or an empty allow-list disables.
 /// Provided by pinkbin-walker crate.
 
-fn compile_scope_set(glob: &str) -> Result<globset::GlobSet, String> {
+fn compile_scope_set(glob: &str) -> Result<globset::GlobSet, CommandError> {
     let pattern = expand_env(glob);
     let g = globset::GlobBuilder::new(&pattern)
         .literal_separator(false)
@@ -387,7 +416,7 @@ fn compile_scope_set(glob: &str) -> Result<globset::GlobSet, String> {
         .map_err(|e| format!("invalid glob {glob:?}: {e}"))?;
     let mut b = globset::GlobSetBuilder::new();
     b.add(g);
-    b.build().map_err(|e| e.to_string())
+    b.build().map_err(CommandError::from)
 }
 
 /// Cached version of `compile_scope_set`. Looks up the compiled GlobSet in
@@ -397,7 +426,7 @@ fn compile_scope_set(glob: &str) -> Result<globset::GlobSet, String> {
 fn compile_scope_set_cached(
     glob: &str,
     cache: &Mutex<HashMap<String, globset::GlobSet>>,
-) -> Result<globset::GlobSet, String> {
+) -> Result<globset::GlobSet, CommandError> {
     {
         let c = cache.lock().unwrap();
         if let Some(set) = c.get(glob) {
@@ -464,7 +493,7 @@ async fn scope_sizes(
     scope_days: Option<HashMap<String, u32>>,
     wxid_filter: Option<Vec<String>>,
     env_filter: Option<Vec<String>>,
-) -> Result<Vec<ScopeSize>, String> {
+) -> Result<Vec<ScopeSize>, CommandError> {
     let scaffold = state
         .scaffolds
         .read()
@@ -605,7 +634,7 @@ async fn scope_sizes(
         results
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(CommandError::from)
 }
 
 /// Shared tail of `execute_scope` / `execute_plan`: derive the executor
@@ -622,7 +651,7 @@ async fn dispatch_execution(
     quarantine_root: PathBuf,
     jobs: &Mutex<HashMap<String, Arc<AtomicBool>>>,
     job_id: Option<String>,
-) -> Result<Vec<UndoEntry>, String> {
+) -> Result<Vec<UndoEntry>, CommandError> {
     if matched.is_empty() {
         return Ok(Vec::new());
     }
@@ -658,8 +687,8 @@ async fn dispatch_execution(
         )
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .map_err(CommandError::from)?
+    .map_err(CommandError::from)
 }
 
 /// Resolve a scaffold scope's glob to actual file paths under `root_path` and
@@ -679,7 +708,7 @@ async fn execute_scope(
     wxid_filter: Option<Vec<String>>,
     env_filter: Option<Vec<String>>,
     job_id: Option<String>,
-) -> Result<Vec<UndoEntry>, String> {
+) -> Result<Vec<UndoEntry>, CommandError> {
     let (scaffold, scope) = {
         let scaffolds = state.scaffolds.read().unwrap();
         let sc = scaffolds
@@ -712,7 +741,7 @@ async fn execute_scope(
         )
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(CommandError::from)?;
 
     dispatch_execution(
         &scope,
@@ -746,10 +775,10 @@ struct CondaEnv {
 const CONDA_STALE_DAYS: u64 = 90;
 
 #[tauri::command]
-async fn list_conda_envs(conda_root: String) -> Result<Vec<CondaEnv>, String> {
+async fn list_conda_envs(conda_root: String) -> Result<Vec<CondaEnv>, CommandError> {
     let root = PathBuf::from(&conda_root);
     if !root.exists() {
-        return Err(format!("conda root does not exist: {conda_root}"));
+        return Err(format!("conda root does not exist: {conda_root}").into());
     }
     tokio::task::spawn_blocking(move || -> Vec<CondaEnv> {
         let mut out = Vec::new();
@@ -808,7 +837,7 @@ async fn list_conda_envs(conda_root: String) -> Result<Vec<CondaEnv>, String> {
         out
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(CommandError::from)
 }
 
 fn read_mtime_secs(p: &Path) -> Option<u64> {
@@ -852,7 +881,7 @@ fn dir_size_excluding(dir: &Path, excludes: &[PathBuf]) -> u64 {
 async fn advise(
     state: State<'_, AppState>,
     req: AdvisorRequest,
-) -> Result<AdvisorResponse, String> {
+) -> Result<AdvisorResponse, CommandError> {
     let provider = state
         .advisor
         .lock()
@@ -861,7 +890,7 @@ async fn advise(
         .ok_or_else(|| "advisor not configured — open Settings".to_string())?;
     advise_provider(&provider, &req)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Open the OS file manager and reveal `path`. On Windows this uses
@@ -869,10 +898,10 @@ async fn advise(
 /// the directory itself for directories. On macOS it's `open -R`. On Linux
 /// it's `xdg-open` of the parent directory (no portable "select" verb).
 #[tauri::command]
-fn reveal_in_explorer(path: String) -> Result<(), String> {
+fn reveal_in_explorer(path: String) -> Result<(), CommandError> {
     let p = std::path::Path::new(&path);
     if !p.exists() {
-        return Err(format!("path does not exist: {path}"));
+        return Err(format!("path does not exist: {path}").into());
     }
     #[cfg(target_os = "windows")]
     {
@@ -880,12 +909,12 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
             std::process::Command::new("explorer")
                 .arg(p)
                 .spawn()
-                .map_err(|e| e.to_string())?;
+                .map_err(CommandError::from)?;
         } else {
             std::process::Command::new("explorer")
                 .arg(format!("/select,{}", p.display()))
                 .spawn()
-                .map_err(|e| e.to_string())?;
+                .map_err(CommandError::from)?;
         }
         Ok(())
     }
@@ -895,7 +924,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
             .arg("-R")
             .arg(p)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -908,7 +937,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
         std::process::Command::new("xdg-open")
             .arg(target)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         Ok(())
     }
 }
@@ -929,7 +958,7 @@ async fn execute_plan(
     reason: String,
     dry_run: bool,
     job_id: Option<String>,
-) -> Result<Vec<UndoEntry>, String> {
+) -> Result<Vec<UndoEntry>, CommandError> {
     let (scaffold, scope) = {
         let scaffolds = state.scaffolds.read().unwrap();
         let sc = scaffolds
@@ -957,7 +986,7 @@ async fn execute_plan(
             return Err(format!(
                 "path `{p}` is outside scope `{}/{}` glob `{}` — refusing",
                 scaffold.id, scope.id, scope.glob
-            ));
+            ).into());
         }
         matched.push(pb);
     }
@@ -979,7 +1008,7 @@ async fn execute_plan(
 /// it sees `true`. Idempotent — cancelling a missing or already-completed
 /// job is a no-op.
 #[tauri::command]
-fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), CommandError> {
     if let Some(flag) = state.jobs.lock().unwrap().get(&job_id).cloned() {
         flag.store(true, Ordering::SeqCst);
     }
@@ -1001,7 +1030,7 @@ struct ScopeMatch {
 async fn find_scope_for_path(
     state: State<'_, AppState>,
     path: String,
-) -> Result<Vec<ScopeMatch>, String> {
+) -> Result<Vec<ScopeMatch>, CommandError> {
     let scaffolds = state.scaffolds.read().unwrap();
     let normalized = PathBuf::from(&path)
         .to_string_lossy()
@@ -1037,11 +1066,11 @@ async fn find_scope_for_path(
 /// recommendation flags pre-computed in the backend per design doc §6.5.
 /// Frontend never has to recompute the dormancy heuristic.
 #[tauri::command]
-async fn list_steam_games() -> Result<pinkbin_steam_inspector::SteamInventory, String> {
+async fn list_steam_games() -> Result<pinkbin_steam_inspector::SteamInventory, CommandError> {
     tokio::task::spawn_blocking(pinkbin_steam_inspector::inspect)
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("steam inspect failed: {e:#}"))
+        .map_err(CommandError::from)?
+        .map_err(|e| CommandError::from(format!("steam inspect failed: {e:#}")))
 }
 
 /// Lazily enumerate every Workshop item under one game's
@@ -1052,12 +1081,12 @@ async fn list_steam_games() -> Result<pinkbin_steam_inspector::SteamInventory, S
 async fn list_steam_workshop_items(
     library_root: String,
     appid: u32,
-) -> Result<Vec<pinkbin_steam_inspector::WorkshopItem>, String> {
+) -> Result<Vec<pinkbin_steam_inspector::WorkshopItem>, CommandError> {
     let path = PathBuf::from(library_root);
     tokio::task::spawn_blocking(move || pinkbin_steam_inspector::list_workshop_items(&path, appid))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("workshop scan failed: {e:#}"))
+        .map_err(CommandError::from)?
+        .map_err(|e| CommandError::from(format!("workshop scan failed: {e:#}")))
 }
 
 /// Resolve workshop item IDs to human-readable titles via Steam's public
@@ -1080,7 +1109,7 @@ async fn list_steam_workshop_items(
 /// Steam directly — never to an LLM (where opaque numeric IDs would be
 /// useless anyway).
 #[tauri::command]
-async fn fetch_workshop_titles(ids: Vec<u64>) -> Result<HashMap<u64, String>, String> {
+async fn fetch_workshop_titles(ids: Vec<u64>) -> Result<HashMap<u64, String>, CommandError> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -1154,7 +1183,7 @@ async fn fetch_workshop_titles(ids: Vec<u64>) -> Result<HashMap<u64, String>, St
         )
     })?;
     if !resp.status().is_success() {
-        return Err(format!("Steam 服务器返回 HTTP {}", resp.status()));
+        return Err(format!("Steam 服务器返回 HTTP {}", resp.status()).into());
     }
     let parsed: Resp = resp
         .json()
@@ -1335,12 +1364,12 @@ mod proxy_parse_tests {
 /// (uninstall) leaves the app, and it's Steam itself that runs the action.
 /// `id` is appid for game actions, or workshop file id for `url/CommunityFilePage`.
 #[tauri::command]
-fn open_steam_url(action: String, appid: u64) -> Result<(), String> {
+fn open_steam_url(action: String, appid: u64) -> Result<(), CommandError> {
     // Whitelist actions; `url/CommunityFilePage` is the workshop-item page.
     let url = match action.as_str() {
         "uninstall" | "rungameid" | "validate" | "nav" => format!("steam://{action}/{appid}"),
         "workshop_page" => format!("steam://url/CommunityFilePage/{appid}"),
-        other => return Err(format!("unsupported steam action: {other}")),
+        other => return Err(format!("unsupported steam action: {other}").into()),
     };
 
     #[cfg(target_os = "windows")]
@@ -1351,7 +1380,7 @@ fn open_steam_url(action: String, appid: u64) -> Result<(), String> {
         std::process::Command::new("cmd")
             .args(["/c", "start", "", &url])
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         Ok(())
     }
     #[cfg(target_os = "macos")]
@@ -1359,7 +1388,7 @@ fn open_steam_url(action: String, appid: u64) -> Result<(), String> {
         std::process::Command::new("open")
             .arg(&url)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1367,7 +1396,7 @@ fn open_steam_url(action: String, appid: u64) -> Result<(), String> {
         std::process::Command::new("xdg-open")
             .arg(&url)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         Ok(())
     }
 }
@@ -1379,7 +1408,7 @@ fn set_advisor(
     provider: String,
     model: String,
     base_url: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     // The API key is read from the OS credential store — it is no longer
     // shipped in this IPC payload. The frontend stores it via
     // `store_secret` (which uses tauri-plugin-keyring) and we look it up
@@ -1391,10 +1420,10 @@ fn set_advisor(
         Ok(None) => {
             return Err(
                 "advisor key not found in keychain. Open Settings and re-enter your API key."
-                    .to_string(),
+                    .into(),
             )
         }
-        Err(e) => return Err(format!("keychain read failed: {e}")),
+        Err(e) => return Err(format!("keychain read failed: {e}").into()),
     };
 
     let p = match provider.as_str() {
@@ -1422,7 +1451,7 @@ fn set_advisor(
             *state.advisor.lock().unwrap() = None;
             return Ok(());
         }
-        other => return Err(format!("unknown provider: {other}")),
+        other => return Err(format!("unknown provider: {other}").into()),
     };
     *state.advisor.lock().unwrap() = Some(p);
     Ok(())
@@ -1446,25 +1475,25 @@ fn store_secret(
     app: AppHandle,
     account: String,
     secret: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     app.keyring()
         .set_password(KEYRING_SERVICE, &account, &secret)
-        .map_err(|e| format!("keyring set `{account}`: {e}"))
+        .map_err(|e| CommandError::from(format!("keyring set `{account}`: {e}")))
 }
 
 #[tauri::command]
-fn load_secret(app: AppHandle, account: String) -> Result<Option<String>, String> {
+fn load_secret(app: AppHandle, account: String) -> Result<Option<String>, CommandError> {
     // `get_password` returns `Result<Option<String>>`: `Ok(None)` for a
     // missing slot, `Err` for genuine keychain errors. The webview needs
     // to be able to distinguish "not configured" from "keychain broken"
     // so we forward both.
     app.keyring()
         .get_password(KEYRING_SERVICE, &account)
-        .map_err(|e| format!("keyring get `{account}`: {e}"))
+        .map_err(|e| CommandError::from(format!("keyring get `{account}`: {e}")))
 }
 
 #[tauri::command]
-fn delete_secret(app: AppHandle, account: String) -> Result<(), String> {
+fn delete_secret(app: AppHandle, account: String) -> Result<(), CommandError> {
     // Make this idempotent: deleting a missing entry returns
     // `Err(NoEntry)`, which we swallow. The Settings UI calls
     // `delete_secret` on "wipe" and the user shouldn't see a scary
@@ -1476,7 +1505,7 @@ fn delete_secret(app: AppHandle, account: String) -> Result<(), String> {
             if msg.to_lowercase().contains("no entry") || msg.contains("NoSuch") {
                 Ok(())
             } else {
-                Err(format!("keyring delete `{account}`: {e}"))
+                Err(format!("keyring delete `{account}`: {e}").into())
             }
         }
     }
@@ -1488,10 +1517,10 @@ fn delete_secret(app: AppHandle, account: String) -> Result<(), String> {
 fn prune_quarantine_cmd(
     state: State<'_, AppState>,
     ttl_days: u32,
-) -> Result<PruneResult, String> {
+) -> Result<PruneResult, CommandError> {
     let root = state.quarantine_root.clone();
     let (count, bytes) =
-        pinkbin_executor::prune_quarantine(&root, ttl_days).map_err(|e| e.to_string())?;
+        pinkbin_executor::prune_quarantine(&root, ttl_days).map_err(CommandError::from)?;
     Ok(PruneResult {
         removed_count: count,
         removed_bytes: bytes,
@@ -1509,22 +1538,31 @@ struct PruneResult {
 /// the action's reason and a path hint for where to find deleted files.
 /// Skips dry-run entries — the UI only wants to show real operations.
 #[tauri::command]
-fn last_undo_entry(state: State<'_, AppState>) -> Result<Option<UndoEntry>, String> {
+fn last_undo_entry(state: State<'_, AppState>) -> Result<Option<UndoEntry>, CommandError> {
+    use std::io::{BufRead, Seek, SeekFrom};
     let path = &state.undo_log;
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(e.to_string().into()),
     };
-    // Read the last non-empty, non-dry-run line.
-    for line in content.lines().rev() {
+    let size = file.metadata().map_err(CommandError::from)?.len();
+    let skip = size.saturating_sub(4096);
+    file.seek(SeekFrom::Start(skip)).map_err(CommandError::from)?;
+    let reader = std::io::BufReader::new(file);
+    let mut tail = String::new();
+    for line in reader.lines() {
+        tail.push_str(&line.map_err(CommandError::from)?);
+        tail.push('\n');
+    }
+    for line in tail.lines().rev() {
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<UndoEntry>(line) {
             Ok(entry) if !entry.dry_run => return Ok(Some(entry)),
-            Ok(_) => continue, // skip dry-run entries
-            Err(e) => return Err(format!("undo.jsonl parse error: {e}")),
+            Ok(_) => continue,
+            Err(e) => return Err(format!("undo.jsonl parse error: {e}").into()),
         }
     }
     Ok(None)
@@ -1535,13 +1573,13 @@ fn last_undo_entry(state: State<'_, AppState>) -> Result<Option<UndoEntry>, Stri
 /// on Linux `xdg-open trash:///`. The user can then right-click →
 /// restore any file they cleaned via Recycle mode.
 #[tauri::command]
-fn open_recycle_bin() -> Result<(), String> {
+fn open_recycle_bin() -> Result<(), CommandError> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
             .arg("shell:RecycleBinFolder")
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -1551,14 +1589,14 @@ fn open_recycle_bin() -> Result<(), String> {
                 std::env::var("HOME").unwrap_or_default()
             ))
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
             .arg("trash:///")
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
     }
     Ok(())
 }
@@ -1568,7 +1606,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,pinkbin=info")),
         )
         .with_target(false)
         .init();
@@ -1617,6 +1655,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_path,
             list_scaffolds,
+            get_app_version,
             scope_sizes,
             execute_scope,
             execute_plan,

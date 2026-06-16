@@ -306,7 +306,6 @@ pub fn execute_with_cancel(
                 dry_run: true,
             });
         }
-        write_log_atomic(undo_log, &out)?;
         return Ok(out);
     }
 
@@ -324,11 +323,14 @@ pub fn execute_with_cancel(
             // mark the file deleted locally — and the OneDrive client would
             // then propagate that tombstone to the cloud, turning a local
             // recycle into a permanent cross-device data loss.
+            let mut missing = 0u64;
+            let mut trash_failed = 0u64;
             for src in &plan.paths {
                 check_cancel!(cancel);
                 let attrs = probe(src);
                 if attrs.is_missing {
-                    tracing::warn!("recycle: path not found, skipping {:?}", src);
+                    tracing::debug!("recycle: path not found, skipping {:?}", src);
+                    missing += 1;
                     continue;
                 }
                 if attrs.is_mount_point {
@@ -338,7 +340,8 @@ pub fn execute_with_cancel(
                     );
                 }
                 if let Err(e) = trash::delete(src) {
-                    tracing::warn!("recycle: failed to trash {:?}: {e}", src);
+                    tracing::debug!("recycle: failed to trash {:?}: {e}", src);
+                    trash_failed += 1;
                     continue;
                 }
                 let entry = UndoEntry {
@@ -351,14 +354,21 @@ pub fn execute_with_cancel(
                 };
                 out.push(entry);
             }
+            if missing > 0 || trash_failed > 0 {
+                tracing::warn!(
+                    "recycle summary: {missing} missing, {trash_failed} trash-failed"
+                );
+            }
         }
         Action::Quarantine => {
             std::fs::create_dir_all(quarantine_root)?;
+            let mut missing = 0u64;
             for src in &plan.paths {
                 check_cancel!(cancel);
                 let attrs = probe(src);
                 if attrs.is_missing {
-                    tracing::warn!("quarantine: path not found, skipping {:?}", src);
+                    tracing::debug!("quarantine: path not found, skipping {:?}", src);
+                    missing += 1;
                     continue;
                 }
                 if attrs.is_mount_point {
@@ -400,13 +410,18 @@ pub fn execute_with_cancel(
                     dry_run: false,
                 });
             }
+            if missing > 0 {
+                tracing::warn!("quarantine summary: {missing} missing");
+            }
         }
         Action::Delete => {
+            let mut missing = 0u64;
             for p in &plan.paths {
                 check_cancel!(cancel);
                 let attrs = probe(p);
                 if attrs.is_missing {
-                    tracing::warn!("delete: path not found, skipping {:?}", p);
+                    tracing::debug!("delete: path not found, skipping {:?}", p);
+                    missing += 1;
                     continue;
                 }
                 // Mount-point / reparse-point check must come BEFORE the
@@ -448,6 +463,9 @@ pub fn execute_with_cancel(
                     reason: plan.reason.clone(),
                     dry_run: false,
                 });
+            }
+            if missing > 0 {
+                tracing::warn!("delete summary: {missing} missing");
             }
         }
     }
@@ -662,13 +680,8 @@ mod tests {
         assert_eq!(out[0].source, file);
         // File must NOT have been deleted.
         assert!(file.exists(), "dry run deleted the file");
-        // Log must exist with valid JSONL.
-        assert!(log.exists(), "dry run did not write log");
-        let content = fs::read_to_string(&log).unwrap();
-        assert!(!content.is_empty(), "dry run log is empty");
-        let entry: UndoEntry = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(entry.action, Action::Delete);
-        assert!(entry.reason.contains("dry-run"));
+        // Dry-run must NOT write to the undo log.
+        assert!(!log.exists(), "dry run should not write log");
 
         let _ = fs::remove_dir_all(&dir);
     }

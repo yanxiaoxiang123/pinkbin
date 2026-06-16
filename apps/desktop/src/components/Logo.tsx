@@ -36,18 +36,22 @@ const COLOR: Record<string, string> = {
   W: '#ffffff',
 };
 
-export function Logo({ size = 22 }: { size?: number }) {
-  const cells: { x: number; y: number; c: string }[] = [];
+const CELLS: { x: number; y: number; c: string }[] = (() => {
+  const out: { x: number; y: number; c: string }[] = [];
   for (let y = 0; y < ROWS.length; y++) {
     const row = ROWS[y];
     for (let x = 0; x < row.length; x++) {
       const ch = row[x];
-      if (COLOR[ch]) cells.push({ x, y, c: COLOR[ch] });
+      if (COLOR[ch]) out.push({ x, y, c: COLOR[ch] });
     }
   }
+  return out;
+})();
+
+export function Logo({ size = 22 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" shapeRendering="crispEdges" aria-hidden>
-      {cells.map((p, i) => (
+      {CELLS.map((p, i) => (
         <rect key={i} x={p.x} y={p.y} width={1} height={1} fill={p.c} />
       ))}
     </svg>
