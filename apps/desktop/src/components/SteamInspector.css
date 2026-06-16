@@ -103,7 +103,7 @@
   user-select: none;
 }
 .steam-row:hover { background: var(--paper-2); border-color: var(--ink-3); }
-.steam-row.recommended { background: var(--pink-bg); border-left: 4px solid var(--lavender); padding-left: 10px; }
+.steam-row.recommended { background: var(--surface-pearl); border-left: 4px solid var(--primary); padding-left: 10px; }
 .steam-row.ghost { background: #fff3e0; border-left: 4px solid var(--warn); padding-left: 10px; }
 .steam-row.selected { border-color: var(--ink); box-shadow: var(--shadow-sm); transform: translate(-1px, -1px); }
 .steam-row-icon { display: flex; align-items: center; justify-content: center; color: var(--ink-2); }
@@ -132,7 +132,7 @@
 .steam-detail-meta > div { display: flex; justify-content: space-between; gap: 12px; }
 .steam-detail-meta span { color: var(--ink-3); }
 .steam-detail-meta b { font-weight: 600; color: var(--ink); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.steam-detail-reason { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--pink-bg); border: 2px solid var(--lavender); border-radius: 10px; }
+.steam-detail-reason { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--surface-pearl); border: 1px solid var(--primary); border-radius: var(--r-md); }
 .steam-detail-reason > svg { color: var(--pink-deep); flex-shrink: 0; margin-top: 2px; }
 .steam-detail-reason b { display: block; font-size: 12px; color: var(--ink); margin-bottom: 2px; }
 .steam-detail-reason p { font-size: 12px; color: var(--ink-2); margin: 0; }
