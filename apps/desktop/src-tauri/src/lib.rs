@@ -15,8 +15,8 @@ use pinkbin_scaffold::{
 };
 use pinkbin_scanner::{sample_paths, scan_with_stats, Node, ScanOptions, ScanStats, SCAN_CANCELLED};
 use pinkbin_walker::{
-    find_matching_dirs, is_pruned_system_dir, mtime_older_than, path_passes_env, path_passes_wxid,
-    pinkbin_walker, PRUNED_SYSTEM_DIRS,
+    find_matching_dirs, mtime_older_than, path_passes_env, path_passes_wxid,
+    pinkbin_walker,
 };
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -107,6 +107,11 @@ struct AppState {
     /// Map of active job_id → cancel flag. Set to `true` to request
     /// early termination of a running `execute_scope` / `execute_plan`.
     jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Cache of compiled scope globs. Key is the raw glob string from the
+    /// scaffold TOML; value is the compiled GlobSet. Lazily populated on
+    /// first use — avoids recompiling the same glob on every
+    /// `find_scope_for_path` / `execute_scope` / `execute_plan` call.
+    compiled_scopes: Mutex<HashMap<String, globset::GlobSet>>,
 }
 
 #[tauri::command]
@@ -218,7 +223,7 @@ async fn scan_path(
 /// truncated out at deeper scan roots where the cap shrinks to 20.
 fn tag_and_truncate(node: &mut Node, compiled: &[CompiledScaffold], depth: usize) {
     if node.is_dir {
-        node.scaffold_id = detect_compiled(compiled, std::path::Path::new(&node.path));
+        node.scaffold_id = detect_compiled(compiled, std::path::Path::new(&*node.path));
     }
     for c in &mut node.children {
         tag_and_truncate(c, compiled, depth + 1);
@@ -391,6 +396,25 @@ fn compile_scope_set(glob: &str) -> Result<globset::GlobSet, String> {
     b.build().map_err(|e| e.to_string())
 }
 
+/// Cached version of `compile_scope_set`. Looks up the compiled GlobSet in
+/// the cache first; on miss, compiles and stores it. The cache key is the
+/// raw glob string (before env expansion) so identical globs across
+/// different scaffolds share one compiled entry.
+fn compile_scope_set_cached(
+    glob: &str,
+    cache: &Mutex<HashMap<String, globset::GlobSet>>,
+) -> Result<globset::GlobSet, String> {
+    {
+        let c = cache.lock().unwrap();
+        if let Some(set) = c.get(glob) {
+            return Ok(set.clone());
+        }
+    }
+    let set = compile_scope_set(glob)?;
+    cache.lock().unwrap().insert(glob.to_string(), set.clone());
+    Ok(set)
+}
+
 /// Walk `root` and return paths matching `set`, subject to filters.
 /// Directory-granularity scopes delegate to `find_matching_dirs`.
 fn resolve_scope_paths(
@@ -412,14 +436,17 @@ fn resolve_scope_paths(
                     continue;
                 }
                 let path = entry.path();
+                // Hoist lightweight filter checks before the metadata syscall.
+                if !path_passes_wxid(&path, wxid_filter)
+                    || !path_passes_env(&path, env_filter)
+                {
+                    continue;
+                }
                 let metadata = match entry.metadata() {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                if !path_passes_wxid(&path, wxid_filter)
-                    || !path_passes_env(&path, env_filter)
-                    || !mtime_older_than(&metadata, older_than_days)
-                {
+                if !mtime_older_than(&metadata, older_than_days) {
                     continue;
                 }
                 let s = path.to_string_lossy().replace('\\', "/");
@@ -463,7 +490,7 @@ async fn scope_sizes(
     }
     let mut builds: Vec<ScopeBuild> = Vec::with_capacity(scaffold.scopes.len());
     for sc in &scaffold.scopes {
-        let set = compile_scope_set(&sc.glob)
+        let set = compile_scope_set_cached(&sc.glob, &state.compiled_scopes)
             .map_err(|e| format!("scope `{}`: {e}", sc.id))?;
         builds.push(ScopeBuild {
             id: sc.id.clone(),
@@ -504,15 +531,16 @@ async fn scope_sizes(
                     continue;
                 }
                 let path = entry.path();
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
+                // Hoist lightweight filter checks before the metadata syscall.
                 if !path_passes_wxid(&path, wxid_filter_owned.as_deref())
                     || !path_passes_env(&path, env_filter_owned.as_deref())
                 {
                     continue;
                 }
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
                 let path_str = path.to_string_lossy().replace('\\', "/");
                 let size = metadata.len();
                 for &i in &file_indices {
@@ -620,7 +648,7 @@ async fn execute_scope(
         (sc, scope)
     };
 
-    let set = compile_scope_set(&scope.glob)
+    let set = compile_scope_set_cached(&scope.glob, &state.compiled_scopes)
         .map_err(|e| format!("scope `{}`: {e}", scope.id))?;
     let root = PathBuf::from(&root_path);
     let granularity = scope.recycle_granularity;
@@ -918,7 +946,7 @@ async fn execute_plan(
         (sc, scope)
     };
 
-    let set = compile_scope_set(&scope.glob)
+    let set = compile_scope_set_cached(&scope.glob, &state.compiled_scopes)
         .map_err(|e| format!("scope `{}`: {e}", scope.id))?;
 
     let mut matched: Vec<PathBuf> = Vec::with_capacity(paths.len());
@@ -1021,7 +1049,7 @@ async fn find_scope_for_path(
     let mut out = Vec::new();
     for s in scaffolds.iter() {
         for sc in &s.scopes {
-            match compile_scope_set(&sc.glob) {
+            match compile_scope_set_cached(&sc.glob, &state.compiled_scopes) {
                 Ok(set) if set.is_match(&normalized) => {
                     let mode = match sc.mode {
                         pinkbin_scaffold::Mode::Recycle => "recycle",
@@ -1622,6 +1650,7 @@ pub fn run() {
                 quarantine_root,
                 undo_log,
                 jobs: Mutex::new(HashMap::new()),
+                compiled_scopes: Mutex::new(HashMap::new()),
             });
             Ok(())
         })

@@ -74,9 +74,6 @@ export default function App() {
     }
   }, [scanning, scanProgress, scanTotalBytes]);
 
-  useEffect(() => { setNumber('leftWidth', leftWidth); }, [leftWidth]);
-  useEffect(() => { setNumber('rightWidth', rightWidth); }, [rightWidth]);
-
   useEffect(() => { api.listScaffolds().then(setScaffolds).catch(() => {}); }, [setScaffolds]);
 
   // One-shot migration: if the user upgraded from a version that stored
@@ -123,6 +120,9 @@ export default function App() {
       return Math.max(MIN_RIGHT, Math.min(maxRight, w - dx));
     });
   };
+
+  const saveLeftWidth = () => { setNumber('leftWidth', leftWidth); };
+  const saveRightWidth = () => { setNumber('rightWidth', rightWidth); };
 
   const pickDirectory = async () => {
     if (!isTauri) {
@@ -197,13 +197,13 @@ export default function App() {
           {root ? <TreeView root={root} selectedPath={selectedPath} onSelect={select} /> : <EmptyLeft />}
         </aside>
 
-        <Splitter onDrag={dragLeft} onDoubleClick={() => setLeftWidth(DEFAULT_LEFT)} />
+        <Splitter onDrag={dragLeft} onDragEnd={saveLeftWidth} onDoubleClick={() => { setLeftWidth(DEFAULT_LEFT); setNumber('leftWidth', DEFAULT_LEFT); }} />
 
         <section className="center">
           <ChatPanel />
         </section>
 
-        <Splitter onDrag={dragRight} onDoubleClick={() => setRightWidth(DEFAULT_RIGHT)} />
+        <Splitter onDrag={dragRight} onDragEnd={saveRightWidth} onDoubleClick={() => { setRightWidth(DEFAULT_RIGHT); setNumber('rightWidth', DEFAULT_RIGHT); }} />
 
         <aside className="right">
           <ErrorBoundary fallbackLabel="Studio 面板渲染失败">

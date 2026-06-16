@@ -8,7 +8,6 @@ import type { Node, Scaffold } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ContextMenu, type ContextMenuState } from './ContextMenu';
 import { getBool } from '../persist';
-import { collectScaffoldMatches } from '../tree';
 import './Studio.css';
 
 const CleanupModal = lazy(() => import('./CleanupModal').then((m) => ({ default: m.CleanupModal })));
@@ -71,12 +70,7 @@ export function Studio() {
 
   const [openTool, setOpenTool] = useState<null | 'steam-inspector'>(null);
 
-  // expanded set persisted to localStorage via the store; survives restarts.
-  const expandedArr = useStore((s) => s.studioExpanded);
-  const expanded = useMemo(() => new Set(expandedArr), [expandedArr]);
-  const toggleExpanded = useStore((s) => s.toggleStudioExpanded);
-
-  const hidden = getBool('hideStudio', false);
+  const [hidden] = useState(() => getBool('hideStudio', false));
   const scanInProgress = useStore((s) => s.scanInProgress);
 
   const [pruneMsg, setPruneMsg] = useState<string | null>(null);
@@ -111,10 +105,27 @@ export function Studio() {
     // just shows the reason so the user knows what happened.
   }, [lastUndo]);
 
+  // Pre-compute scaffold matches in a single tree walk instead of 28 DFS.
+  const matchesByScaffold = useMemo(() => {
+    const map = new Map<string, Node[]>();
+    if (!root) return map;
+    const dfs = (n: Node) => {
+      if (n.scaffold_id) {
+        let arr = map.get(n.scaffold_id);
+        if (!arr) { arr = []; map.set(n.scaffold_id, arr); }
+        arr.push(n);
+        return; // don't recurse into already-tagged subtrees
+      }
+      for (const c of n.children ?? []) dfs(c);
+    };
+    dfs(root);
+    return map;
+  }, [root]);
+
   const allCards: CardData[] = useMemo(() => {
     if (hidden) return [];
     const items: CardData[] = scaffolds.map((sc) => {
-      let matches = collectScaffoldMatches(root, sc.id);
+      let matches = matchesByScaffold.get(sc.id) ?? [];
       if (matches.length === 0) {
         const fb = fallbackByNameContains(root, sc);
         if (fb) matches = [fb];
@@ -133,7 +144,7 @@ export function Studio() {
       return a.scaffold.name.localeCompare(b.scaffold.name);
     });
     return items;
-  }, [scaffolds, root, hidden]);
+  }, [scaffolds, matchesByScaffold, root, hidden]);
 
   if (hidden) {
     return (
@@ -148,8 +159,6 @@ export function Studio() {
 
   const featured = allCards.filter((c) => FEATURED_IDS.includes(c.scaffold.id));
   const others = allCards.filter((c) => !FEATURED_IDS.includes(c.scaffold.id));
-
-  const toggle = (id: string) => toggleExpanded(id);
 
   return (
     <div className={clsx('studio', scanInProgress && 'stale')}>
@@ -205,7 +214,7 @@ export function Studio() {
         </ErrorBoundary>
         {featured.map((c) => (
           <ErrorBoundary key={c.scaffold.id} fallbackLabel={`${c.scaffold.name} 卡片渲染失败`}>
-            <Card card={c} expanded={expanded.has(c.scaffold.id)} onToggle={() => toggle(c.scaffold.id)} onAsk={() => requestStudio(c.scaffold.id)} />
+            <Card card={c} onAsk={() => requestStudio(c.scaffold.id)} />
           </ErrorBoundary>
         ))}
       </div>
@@ -216,7 +225,7 @@ export function Studio() {
           <div className="studio-grid">
             {others.map((c) => (
               <ErrorBoundary key={c.scaffold.id} fallbackLabel={`${c.scaffold.name} 卡片渲染失败`}>
-                <Card card={c} expanded={expanded.has(c.scaffold.id)} onToggle={() => toggle(c.scaffold.id)} onAsk={() => requestStudio(c.scaffold.id)} />
+                <Card card={c} onAsk={() => requestStudio(c.scaffold.id)} />
               </ErrorBoundary>
             ))}
           </div>
@@ -262,10 +271,12 @@ function ToolCard({
   );
 }
 
-function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: boolean; onToggle: () => void; onAsk: () => void }) {
+function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
   const sc = card.scaffold;
   const matches = card.matches;
   const detected = matches.length > 0;
+  const expanded = useStore((s) => s.studioExpanded.includes(sc.id));
+  const toggleExpanded = useStore((s) => s.toggleStudioExpanded);
   const Caret = expanded ? ChevronDown : ChevronRight;
   const addReclaimed = useStore((s) => s.addReclaimed);
 
@@ -308,7 +319,7 @@ function Card({ card, expanded, onToggle, onAsk }: { card: CardData; expanded: b
     <div className={clsx('studio-card-wrap', `risk-${sc.risk}`, detected && 'detected')}>
       <button
         className="studio-card"
-        onClick={onToggle}
+        onClick={() => toggleExpanded(sc.id)}
         title={sc.disclaimer}
       >
         <Caret size={14} className="studio-caret" />

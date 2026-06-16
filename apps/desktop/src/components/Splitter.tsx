@@ -2,11 +2,12 @@ import { useEffect, useRef } from 'react';
 
 type Props = {
   onDrag: (deltaPx: number) => void;
+  onDragEnd?: () => void;
   onDoubleClick?: () => void;
   ariaValueNow?: number;
 };
 
-export function Splitter({ onDrag, onDoubleClick, ariaValueNow }: Props) {
+export function Splitter({ onDrag, onDragEnd, onDoubleClick, ariaValueNow }: Props) {
   const startX = useRef(0);
   const dragging = useRef(false);
 
@@ -22,6 +23,7 @@ export function Splitter({ onDrag, onDoubleClick, ariaValueNow }: Props) {
       dragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      onDragEnd?.();
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -29,7 +31,7 @@ export function Splitter({ onDrag, onDoubleClick, ariaValueNow }: Props) {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [onDrag]);
+  }, [onDrag, onDragEnd]);
 
   return (
     <div

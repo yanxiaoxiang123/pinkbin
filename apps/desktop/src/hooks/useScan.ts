@@ -87,6 +87,7 @@ export function useScan(pickedPath: string) {
     if (!pickedPath) return;
     setErr(null);
     setScanning(true);
+    setScanInProgress(true);
     setScanProgress(null);
     setScanTotalBytes(null);
     setDiag(null);
@@ -161,12 +162,6 @@ export function useScan(pickedPath: string) {
       }
     }
   }, [pickedPath, setRoot, select, setScanInProgress]);
-
-  // Mirror the local scanning flag into the store so non-hook consumers
-  // (Studio) can react without prop-drilling.
-  useEffect(() => {
-    setScanInProgress(scanning);
-  }, [scanning, setScanInProgress]);
 
   const cancel = useCallback(() => {
     const sid = activeScanId.current;

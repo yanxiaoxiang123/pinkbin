@@ -13,6 +13,27 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+// Serde helpers for Arc<str> — serializes as plain string, deserializes into Arc.
+fn serialize_arc_str<S: serde::Serializer>(v: &Arc<str>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(v)
+}
+fn deserialize_arc_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Arc<str>, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(Arc::from(s))
+}
+fn serialize_arc_str_vec<S: serde::Serializer>(v: &[Arc<str>], s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(v.len()))?;
+    for item in v {
+        seq.serialize_element(&**item)?;
+    }
+    seq.end()
+}
+fn deserialize_arc_str_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Arc<str>>, D::Error> {
+    let v = Vec::<String>::deserialize(d)?;
+    Ok(v.into_iter().map(Arc::from).collect())
+}
+
 #[cfg(windows)]
 mod mft;
 
@@ -24,7 +45,8 @@ pub const SCAN_CANCELLED: &str = "scan_cancelled";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
-    pub path: String,
+    #[serde(serialize_with = "serialize_arc_str", deserialize_with = "deserialize_arc_str")]
+    pub path: Arc<str>,
     pub is_dir: bool,
     pub size: u64,
     pub file_count: u64,
@@ -37,8 +59,8 @@ pub struct Node {
     /// `SAMPLE_LIMIT_PER_DIR`. Populated during the scan so the AI advisor
     /// can see "what's actually in here" without a separate inspect IPC
     /// round-trip per matched location.
-    #[serde(default)]
-    pub sample_paths: Vec<String>,
+    #[serde(default, serialize_with = "serialize_arc_str_vec", deserialize_with = "deserialize_arc_str_vec")]
+    pub sample_paths: Vec<Arc<str>>,
     /// Pre-computed during tag_and_truncate post-order — indicates whether
     /// this node or any descendant has a scaffold_id. Avoids O(N²) subtree
     /// traversal during truncation partitioning. Not serialized; only used
@@ -66,7 +88,7 @@ struct DirAcc {
     files: Vec<(String, u64)>, // (file name, size) — only kept on the immediate parent
     /// File paths (full) within SAMPLE_DEPTH of this directory, capped at
     /// SAMPLE_LIMIT_PER_DIR. Filled during the walk; consumed by build_tree.
-    sample_paths: Vec<String>,
+    sample_paths: Vec<Arc<str>>,
     /// Subdirectory names recorded by jwalk's process_read_dir callback,
     /// used by build_tree instead of a second filesystem read_dir pass.
     subdirs: Vec<String>,
@@ -319,7 +341,7 @@ where
         // SAMPLE_LIMIT_PER_DIR per dir. Cost is O(SAMPLE_DEPTH) HashMap lookups
         // + Vec pushes per file; with a per-dir cap the total memory is bounded
         // by SAMPLE_LIMIT_PER_DIR × number of nodes that actually contain files.
-        let path_str = path.to_string_lossy().to_string();
+        let path_str: Arc<str> = Arc::from(path.to_string_lossy().as_ref());
         let mut cur = path.parent();
         let mut hops = 0;
         while let Some(dir) = cur {
@@ -429,7 +451,7 @@ fn build_tree_depth(
             .unwrap_or_else(|| dir.to_string_lossy().to_string());
         return Node {
             name,
-            path: dir.to_string_lossy().to_string(),
+            path: Arc::from(dir.to_string_lossy().as_ref()),
             is_dir: true,
             size: 0,
             file_count: 0,
@@ -501,7 +523,7 @@ fn build_tree_depth(
             let fpath = dir.join(&fname);
             children.push(Node {
                 name: fname,
-                path: fpath.to_string_lossy().to_string(),
+                path: Arc::from(fpath.to_string_lossy().as_ref()),
                 is_dir: false,
                 size: fsize,
                 file_count: 1,
@@ -518,7 +540,7 @@ fn build_tree_depth(
 
     Node {
         name,
-        path: dir.to_string_lossy().to_string(),
+        path: Arc::from(dir.to_string_lossy().as_ref()),
         is_dir: true,
         size,
         file_count,

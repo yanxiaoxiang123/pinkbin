@@ -16,6 +16,7 @@ use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::{ExtShare, Node};
 
@@ -347,21 +348,29 @@ fn build_node(
         // extensions, matching walkdir's per-directory semantics.
     }
 
-    let mut top_extensions: Vec<ExtShare> = ext_bytes
+    // Use BinaryHeap to keep only top-8 extensions in O(N log 8) instead of
+    // sorting all extensions in O(N log N).
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+
+    let mut heap: BinaryHeap<Reverse<(u64, String, u64)>> = BinaryHeap::new();
+    for (ext, bytes) in ext_bytes {
+        let count = ext_count.get(&ext).copied().unwrap_or(0);
+        heap.push(Reverse((bytes, ext, count)));
+        if heap.len() > 8 {
+            heap.pop();
+        }
+    }
+    let mut top_extensions: Vec<ExtShare> = heap
         .into_iter()
-        .map(|(ext, bytes)| ExtShare {
-            ext: ext.clone(),
-            bytes,
-            count: ext_count.get(&ext).copied().unwrap_or(0),
-        })
+        .map(|Reverse((bytes, ext, count))| ExtShare { ext, bytes, count })
         .collect();
     top_extensions.sort_by_key(|e| std::cmp::Reverse(e.bytes));
-    top_extensions.truncate(8);
 
     // Populate sample_paths from immediate children + child directories' paths.
     // Mirrors walkdir's SAMPLE_DEPTH logic: each recursion level naturally
     // extends reach by one hop without explicit depth counting.
-    let mut sample_paths: Vec<String> = Vec::new();
+    let mut sample_paths: Vec<Arc<str>> = Vec::new();
     for child in &children_nodes {
         if sample_paths.len() >= crate::SAMPLE_LIMIT_PER_DIR {
             break;
@@ -376,7 +385,7 @@ fn build_node(
 
     Node {
         name,
-        path: path.to_string_lossy().to_string(),
+        path: Arc::from(path.to_string_lossy().as_ref()),
         is_dir,
         size,
         file_count,

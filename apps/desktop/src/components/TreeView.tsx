@@ -41,12 +41,40 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
   const [open, setOpen] = useState<Set<string>>(() => new Set([root.path]));
   const { ref: bodyRef, size } = useElementSize();
 
+  // Helper: collect visible rows for a subtree (used for incremental expand).
+  const collectVisibleRows = useCallback((n: Node, depth: number, parentSize: number, out: VisibleRow[]) => {
+    if (depth > 0) {
+      out.push({ kind: 'node', node: n, parentSize, depth });
+    }
+    if (n.is_dir && open.has(n.path) && n.children.length > 0) {
+      const kids = n.children;
+      const showCount = Math.min(kids.length, CHILD_LIMIT);
+      for (let i = 0; i < showCount; i++) {
+        const kid = kids[i];
+        if (kid) collectVisibleRows(kid, depth + 1, n.size || 1, out);
+      }
+      if (kids.length > CHILD_LIMIT) {
+        out.push({ kind: 'truncated', parent: n, hidden: kids.length - CHILD_LIMIT, depth: depth + 1 });
+      }
+    }
+  }, [open]);
+
+  // Initialize flatRows from root.
+  const [flatRows, setFlatRows] = useState<VisibleRow[]>(() => {
+    const out: VisibleRow[] = [];
+    collectVisibleRows(root, 0, root.size || 1, out);
+    return out;
+  });
+
   // Reset expanded paths whenever a new scan lands — old paths in the set
   // simply miss on the new tree (no-op) but the explicit reset keeps
   // memory from carrying paths that may not exist anymore.
   useEffect(() => {
     setOpen(new Set([root.path]));
-  }, [root.path]);
+    const out: VisibleRow[] = [];
+    collectVisibleRows(root, 0, root.size || 1, out);
+    setFlatRows(out);
+  }, [root.path, collectVisibleRows]);
 
   // Global drop-target guard: when dragging a TreeView row over an element
   // that does NOT have `[data-accept-drop]` (e.g. Studio, TreeView itself),
@@ -81,40 +109,73 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
     };
   }, []);
 
-  const flatRows = useMemo<VisibleRow[]>(() => {
-    const out: VisibleRow[] = [];
-    const visit = (n: Node, depth: number, parentSize: number) => {
-      if (depth > 0) {
-        out.push({ kind: 'node', node: n, parentSize, depth });
-      }
-      if (n.is_dir && open.has(n.path) && n.children.length > 0) {
-        const kids = n.children;
-        const showCount = Math.min(kids.length, CHILD_LIMIT);
-        for (let i = 0; i < showCount; i++) {
-          visit(kids[i], depth + 1, n.size || 1);
-        }
-        if (kids.length > CHILD_LIMIT) {
-          out.push({
-            kind: 'truncated',
-            parent: n,
-            hidden: kids.length - CHILD_LIMIT,
-            depth: depth + 1,
-          });
-        }
-      }
-    };
-    visit(root, 0, root.size || 1);
-    return out;
-  }, [root, open]);
+  // Find a node by path in the tree. Returns null if not found.
+  const findNode = useCallback((n: Node, path: string): Node | null => {
+    if (n.path === path) return n;
+    for (const c of n.children ?? []) {
+      const found = findNode(c, path);
+      if (found) return found;
+    }
+    return null;
+  }, []);
+
+  // Collect visible rows for a node's direct children (for incremental expand).
+  function collectChildrenRows(parent: Node, out: VisibleRow[]) {
+    const kids = parent.children;
+    const showCount = Math.min(kids.length, CHILD_LIMIT);
+    for (let i = 0; i < showCount; i++) {
+      const kid = kids[i];
+      if (kid) collectVisibleRows(kid, 1, parent.size || 1, out);
+    }
+    if (kids.length > CHILD_LIMIT) {
+      out.push({ kind: 'truncated', parent, hidden: kids.length - CHILD_LIMIT, depth: 1 });
+    }
+  }
 
   const toggle = useCallback((path: string) => {
     setOpen((s) => {
       const next = new Set(s);
-      if (next.has(path)) next.delete(path);
+      const wasOpen = next.has(path);
+      if (wasOpen) next.delete(path);
       else next.add(path);
+
+      // Incremental flatRows update.
+      setFlatRows((prev) => {
+        const node = findNode(root, path);
+        if (!node || !node.is_dir || node.children.length === 0) return prev;
+
+        // Find the index of the toggled row.
+        const idx = prev.findIndex((r) => r.kind === 'node' && r.node.path === path);
+        if (idx === -1) return prev;
+
+        if (wasOpen) {
+          // Collapse: remove all descendant rows (depth > current until same or lesser depth).
+          const currentDepth = (prev[idx] as NodeRow).depth;
+          let end = idx + 1;
+          while (end < prev.length) {
+            const r = prev[end];
+            if (!r) break;
+            const rDepth = r.kind === 'node' ? r.depth : r.depth;
+            if (rDepth <= currentDepth) break;
+            end++;
+          }
+          const nextRows = [...prev];
+          nextRows.splice(idx + 1, end - idx - 1);
+          return nextRows;
+        } else {
+          // Expand: insert children rows after the toggled row.
+          const children: VisibleRow[] = [];
+          collectChildrenRows(node, children);
+          if (children.length === 0) return prev;
+          const nextRows = [...prev];
+          nextRows.splice(idx + 1, 0, ...children);
+          return nextRows;
+        }
+      });
+
       return next;
     });
-  }, []);
+  }, [root, findNode, collectVisibleRows]);
 
   const openCtx = useCallback((e: MouseEvent, node: Node) => {
     e.preventDefault();
@@ -139,6 +200,7 @@ export function TreeView({ root, selectedPath, onSelect }: Props) {
   const renderRow = useCallback(
     ({ index, style }: ListChildComponentProps) => {
       const row = flatRows[index];
+      if (!row) return null;
       if (row.kind === 'truncated') {
         return <TruncatedRowView row={row} style={style} />;
       }
@@ -272,19 +334,21 @@ function FolderGlyph({ open }: { open: boolean }) {
   );
 }
 
-function FileGlyph({ ext }: { ext: string }) {
-  // Pick a tint by file family — keeps the tree visually grep-able like Explorer.
-  const fill =
-    /^(exe|msi|cmd|bat|com)$/i.test(ext) ? '#cfe6ff' :
-    /^(dll|sys|drv|ocx)$/i.test(ext) ? '#dfd6f7' :
-    /^(zip|rar|7z|tar|gz|xz)$/i.test(ext) ? '#ffd6c0' :
-    /^(png|jpg|jpeg|gif|bmp|webp|svg|ico)$/i.test(ext) ? '#ffd0e6' :
-    /^(mp3|wav|flac|m4a|ogg)$/i.test(ext) ? '#d0f0d8' :
-    /^(mp4|mov|mkv|avi|webm)$/i.test(ext) ? '#c8eaef' :
-    /^(txt|md|log)$/i.test(ext) ? '#fff1bd' :
-    /^(json|toml|yaml|yml|xml|ini|conf)$/i.test(ext) ? '#e6f0ff' :
-    /^(pdf)$/i.test(ext) ? '#ffc5c5' :
-    '#ffffff';
+const FILE_EXT_COLORS = new Map<string, string>([
+  ['exe', '#cfe6ff'], ['msi', '#cfe6ff'], ['cmd', '#cfe6ff'], ['bat', '#cfe6ff'], ['com', '#cfe6ff'],
+  ['dll', '#dfd6f7'], ['sys', '#dfd6f7'], ['drv', '#dfd6f7'], ['ocx', '#dfd6f7'],
+  ['zip', '#ffd6c0'], ['rar', '#ffd6c0'], ['7z', '#ffd6c0'], ['tar', '#ffd6c0'], ['gz', '#ffd6c0'], ['xz', '#ffd6c0'],
+  ['png', '#ffd0e6'], ['jpg', '#ffd0e6'], ['jpeg', '#ffd0e6'], ['gif', '#ffd0e6'], ['bmp', '#ffd0e6'], ['webp', '#ffd0e6'], ['svg', '#ffd0e6'], ['ico', '#ffd0e6'],
+  ['mp3', '#d0f0d8'], ['wav', '#d0f0d8'], ['flac', '#d0f0d8'], ['m4a', '#d0f0d8'], ['ogg', '#d0f0d8'],
+  ['mp4', '#c8eaef'], ['mov', '#c8eaef'], ['mkv', '#c8eaef'], ['avi', '#c8eaef'], ['webm', '#c8eaef'],
+  ['txt', '#fff1bd'], ['md', '#fff1bd'], ['log', '#fff1bd'],
+  ['json', '#e6f0ff'], ['toml', '#e6f0ff'], ['yaml', '#e6f0ff'], ['yml', '#e6f0ff'], ['xml', '#e6f0ff'], ['ini', '#e6f0ff'], ['conf', '#e6f0ff'],
+  ['pdf', '#ffc5c5'],
+]);
+const DEFAULT_FILE_COLOR = '#ffffff';
+
+const FileGlyph = memo(function FileGlyph({ ext }: { ext: string }) {
+  const fill = FILE_EXT_COLORS.get(ext) ?? DEFAULT_FILE_COLOR;
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
       <path d="M3.5 2 H10 L13 5 V13.5 A0.5 0.5 0 0 1 12.5 14 H3.5 A0.5 0.5 0 0 1 3 13.5 V2.5 A0.5 0.5 0 0 1 3.5 2 Z"
@@ -292,7 +356,7 @@ function FileGlyph({ ext }: { ext: string }) {
       <path d="M10 2 V5 H13" fill="none" stroke="#5b4d57" strokeWidth="0.7" strokeLinejoin="round" />
     </svg>
   );
-}
+});
 
 function extOf(name: string): string {
   const i = name.lastIndexOf('.');

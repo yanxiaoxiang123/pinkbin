@@ -153,12 +153,14 @@ pub fn find_matching_dirs(
         if !path_passes_wxid(&path, wxid_filter) || !path_passes_env(&path, env_filter) {
             continue;
         }
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !mtime_older_than(&metadata, older_than_days) {
-            continue;
+        if older_than_days.is_some() {
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !mtime_older_than(&metadata, older_than_days) {
+                continue;
+            }
         }
         let path_str = path.to_string_lossy().replace('\\', "/");
         if glob_set.is_match(&path_str) {
@@ -168,10 +170,18 @@ pub fn find_matching_dirs(
 
     // Dedup: if a parent was also matched, keep only the shallower path.
     // (Ancestors always appear before descendants in jwalk's DFS order.)
+    // Stack-based O(N·D) instead of O(N²): pop paths deeper than current,
+    // then check if any remaining path is an ancestor.
     let mut deduped: Vec<PathBuf> = Vec::with_capacity(candidates.len());
+    let mut stack: Vec<PathBuf> = Vec::new();
     for c in &candidates {
-        if !deduped.iter().any(|d| c.starts_with(d)) {
+        let depth = c.components().count();
+        while stack.last().map_or(false, |s| s.components().count() >= depth) {
+            stack.pop();
+        }
+        if !stack.iter().any(|s| c.starts_with(s)) {
             deduped.push(c.clone());
+            stack.push(c.clone());
         }
     }
     deduped

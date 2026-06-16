@@ -23,6 +23,7 @@ export function useChat() {
   const addReclaimed = useStore((s) => s.addReclaimed);
 
   const runStudioPrompt = useCallback(async (sc: Scaffold) => {
+    const root = useStore.getState().root;
     const matches = collectScaffoldMatches(root, sc.id).sort((a, b) => b.size - a.size);
     const totalSize = matches.reduce((s, m) => s + m.size, 0);
     const totalFiles = matches.reduce((s, m) => s + m.file_count, 0);
@@ -30,7 +31,7 @@ export function useChat() {
     const userText = matches.length === 0
       ? `右侧的【${sc.name}】这次扫描里没扫到。它一般会在哪些路径下？里面通常存什么？`
       : matches.length === 1
-        ? `右侧显示扫描里检测到了【${sc.name}】(${formatBytes(totalSize)}, \`${redactPath(matches[0].path)}\`)。这个文件夹里具体都是什么？哪些是可以删的？`
+        ? `右侧显示扫描里检测到了【${sc.name}】(${formatBytes(totalSize)}, \`${redactPath(matches[0]!.path)}\`)。这个文件夹里具体都是什么？哪些是可以删的？`
         : `右侧扫描里检测到了【${sc.name}】，分布在 ${matches.length} 个位置，合计 ${formatBytes(totalSize)} / ${totalFiles.toLocaleString()} 文件：\n${matches.map((m) => `- \`${redactPath(m.path)}\` (${formatBytes(m.size)})`).join('\n')}\n\n这些文件夹各自都是什么？哪些是可以删的？`;
 
     pushTurn({ id: uid(), role: 'user', text: userText });
@@ -95,7 +96,7 @@ export function useChat() {
       setBusy(false);
       endChatRequest(signal);
     }
-  }, [root, pushTurn, patchTurn, setBusy, beginChatRequest, endChatRequest]);
+  }, [pushTurn, patchTurn, setBusy, beginChatRequest, endChatRequest]);
 
   const askFollowUp = useCallback(async (
     text: string,
@@ -183,7 +184,7 @@ export function useChat() {
       pushTurn({ id: uid(), role: 'system', text: msg });
       return;
     }
-    const [m] = matches;
+    const m = matches[0]!;
     try {
       await api.execute(m.scaffold_id, m.scope_id, [target.path], reason, false);
       addReclaimed(target.size);
