@@ -349,7 +349,6 @@ pub fn execute_with_cancel(
                     reason: plan.reason.clone(),
                     dry_run: false,
                 };
-                append_log_atomic(undo_log, &entry)?;
                 out.push(entry);
             }
         }
@@ -400,7 +399,6 @@ pub fn execute_with_cancel(
                     reason: plan.reason.clone(),
                     dry_run: false,
                 });
-                append_log_atomic(undo_log, out.last().unwrap())?;
             }
         }
         Action::Delete => {
@@ -450,10 +448,12 @@ pub fn execute_with_cancel(
                     reason: plan.reason.clone(),
                     dry_run: false,
                 });
-                append_log_atomic(undo_log, out.last().unwrap())?;
             }
         }
     }
+
+    // Batch-write all entries at once instead of per-path to avoid O(N²) I/O.
+    write_log_atomic(undo_log, &out)?;
 
     Ok(out)
 }
@@ -489,6 +489,7 @@ fn write_log_atomic(undo_log: &Path, entries: &[UndoEntry]) -> anyhow::Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn append_log_atomic(undo_log: &Path, entry: &UndoEntry) -> anyhow::Result<()> {
     write_log_atomic(undo_log, std::slice::from_ref(entry))
 }
@@ -504,6 +505,13 @@ fn copy_then_remove(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     if src.is_dir() {
         copy_dir_recursive(src, dst)?;
+        // Guard: only remove source after confirming the copy landed.
+        if !dst.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("copy appeared to succeed but dst missing: {}", dst.display()),
+            ));
+        }
         std::fs::remove_dir_all(src)?;
     } else {
         std::fs::copy(src, dst)?;
@@ -514,17 +522,25 @@ fn copy_then_remove(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let p = entry.path();
-        let d = dst.join(entry.file_name());
-        if p.is_dir() {
-            copy_dir_recursive(&p, &d)?;
-        } else {
-            std::fs::copy(&p, &d)?;
+    // Track success so we can clean up partial copies on failure.
+    let result = (|| -> std::io::Result<()> {
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let p = entry.path();
+            let d = dst.join(entry.file_name());
+            if p.is_dir() {
+                copy_dir_recursive(&p, &d)?;
+            } else {
+                std::fs::copy(&p, &d)?;
+            }
         }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Best-effort cleanup of partial destination to avoid orphaned data.
+        let _ = std::fs::remove_dir_all(dst);
     }
-    Ok(())
+    result
 }
 
 /// Remove quarantined items older than `ttl_days` from `quarantine_root`.
@@ -588,13 +604,20 @@ pub fn prune_quarantine(
     Ok((removed_count, removed_bytes))
 }
 
-/// Sum the size of every file under `dir`, non-recursively following dirs.
+/// Sum the size of every file under `dir`, recursively following dirs.
 fn dir_size_recursive(dir: &Path) -> u64 {
+    dir_size_inner(dir, 0)
+}
+
+fn dir_size_inner(dir: &Path, depth: u32) -> u64 {
+    if depth > 64 {
+        return 0;
+    }
     let mut total: u64 = 0;
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         if let Ok(meta) = entry.metadata() {
             if meta.is_dir() {
-                total = total.saturating_add(dir_size_recursive(&entry.path()));
+                total = total.saturating_add(dir_size_inner(&entry.path(), depth + 1));
             } else {
                 total = total.saturating_add(meta.len());
             }

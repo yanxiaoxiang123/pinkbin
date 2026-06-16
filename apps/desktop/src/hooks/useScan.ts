@@ -1,7 +1,7 @@
 // Scan lifecycle hook. Owns the scan-progress / scan-stats listeners, the
 // round-trip + diag timing, and the setRoot/select side-effects. The
 // returned `start` is the only thing the caller needs to wire to the
-// "扫描" button.
+// "扫描" button. `cancel` aborts an in-progress scan.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
@@ -58,6 +58,9 @@ export function useScan(pickedPath: string) {
   // Holds the latest scan-stats event so we can merge it into ScanDiag once
   // api.scan() returns. Tauri emits the event right before the command resolves.
   const lastBackendStats = useRef<ScanStatsEvent | null>(null);
+  // Monotonic scan ID shared with the backend's jobs map for cancellation.
+  const scanSeq = useRef(0);
+  const activeScanId = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -89,6 +92,9 @@ export function useScan(pickedPath: string) {
     setDiag(null);
     lastBackendStats.current = null;
 
+    const scanId = `scan-${++scanSeq.current}`;
+    activeScanId.current = scanId;
+
     if (isTauri) {
       if (isDriveRoot(pickedPath)) {
         // Drive root: ask the OS for used bytes — instant, exact.
@@ -108,8 +114,11 @@ export function useScan(pickedPath: string) {
     const tTotal0 = performance.now();
     try {
       const tScan0 = performance.now();
-      const node = await api.scan(pickedPath);
+      const node = await api.scan(pickedPath, scanId);
       const tScan1 = performance.now();
+
+      // If this scan was superseded by a newer start() call, discard result.
+      if (activeScanId.current !== scanId) return;
 
       const tSet0 = performance.now();
       setRoot(node);
@@ -141,10 +150,16 @@ export function useScan(pickedPath: string) {
         totalMs: totalMs.toFixed(1),
       });
     } catch (e) {
-      setErr(String(e));
+      if (activeScanId.current !== scanId) return; // cancelled or superseded
+      const msg = String(e);
+      if (msg.includes('scan_cancelled')) return; // user-initiated, not an error
+      setErr(msg);
     } finally {
-      setScanning(false);
-      setScanInProgress(false);
+      if (activeScanId.current === scanId) {
+        activeScanId.current = null;
+        setScanning(false);
+        setScanInProgress(false);
+      }
     }
   }, [pickedPath, setRoot, select, setScanInProgress]);
 
@@ -154,5 +169,12 @@ export function useScan(pickedPath: string) {
     setScanInProgress(scanning);
   }, [scanning, setScanInProgress]);
 
-  return { scanning, scanProgress, scanTotalBytes, diag, err, start };
+  const cancel = useCallback(() => {
+    const sid = activeScanId.current;
+    if (sid) {
+      api.cancelJob(sid).catch(() => {});
+    }
+  }, []);
+
+  return { scanning, scanProgress, scanTotalBytes, diag, err, start, cancel };
 }

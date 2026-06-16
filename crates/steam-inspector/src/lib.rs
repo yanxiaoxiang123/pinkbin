@@ -677,6 +677,13 @@ pub fn list_workshop_items(library_root: &Path, appid: u32) -> Result<Vec<Worksh
 }
 
 fn dir_size_recursive(path: &Path) -> u64 {
+    dir_size_inner(path, 0)
+}
+
+fn dir_size_inner(path: &Path, depth: u32) -> u64 {
+    if depth > 64 {
+        return 0;
+    }
     let mut total = 0u64;
     let iter = match std::fs::read_dir(path) {
         Ok(i) => i,
@@ -686,7 +693,7 @@ fn dir_size_recursive(path: &Path) -> u64 {
         let p = entry.path();
         match entry.metadata() {
             Ok(meta) if meta.is_file() => total += meta.len(),
-            Ok(meta) if meta.is_dir() => total += dir_size_recursive(&p),
+            Ok(meta) if meta.is_dir() => total += dir_size_inner(&p, depth + 1),
             _ => {}
         }
     }

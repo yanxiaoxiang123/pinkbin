@@ -22,7 +22,7 @@ type SteamUrlAction = 'uninstall' | 'rungameid' | 'validate' | 'nav' | 'workshop
 // access time so each call site just writes `api.foo(...)` — no inline
 // `isTauri ? ... : ...` ternaries spread across 17 methods.
 const tauri = {
-  scan: (path: string) => invoke<Node>('scan_path', { path }),
+  scan: (path: string, scanId?: string) => invoke<Node>('scan_path', { path, scanId: scanId ?? null }),
   listScaffolds: () => invoke<Scaffold[]>('list_scaffolds'),
   detectScaffold: (path: string) => invoke<string | null>('detect_scaffold', { path }),
   scopeSizes: (scaffoldId: string, rootPath: string, scopeDays?: Record<string, number>, wxidFilter?: string[], envFilter?: string[]) =>
@@ -78,7 +78,7 @@ const tauri = {
 const browserSecretStore: Map<string, string> = new Map();
 
 const browser = {
-  scan: (path: string) => mocks.scan(path),
+  scan: (_path: string, _scanId?: string) => mocks.scan(_path),
   listScaffolds: () => Promise.resolve(mocks.SCAFFOLDS),
   detectScaffold: (path: string) => mocks.detectScaffold(path),
   scopeSizes: (_scaffoldId: string, _rootPath: string, _scopeDays?: Record<string, number>, _wxidFilter?: string[], _envFilter?: string[]) =>

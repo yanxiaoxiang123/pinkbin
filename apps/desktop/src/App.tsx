@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Folder, ScanLine, Settings as SettingsIcon } from 'lucide-react';
+import { Folder, ScanLine, Settings as SettingsIcon, StopCircle } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { api } from './api';
 import { isTauri } from './env';
@@ -46,7 +46,7 @@ export default function App() {
     return v > MIN_RIGHT ? v : DEFAULT_RIGHT;
   });
 
-  const { scanning, scanProgress, scanTotalBytes, diag, err, start: scan } = useScan(pickedPath);
+  const { scanning, scanProgress, scanTotalBytes, diag, err, start: scan, cancel } = useScan(pickedPath);
   const scanStartRef = useRef(0);
   const [scanEta, setScanEta] = useState('');
 
@@ -90,9 +90,14 @@ export default function App() {
         if (raw && typeof raw.apiKey === 'string' && raw.apiKey) {
           const { apiKey, ...rest } = raw;
           await api.storeSecret(ADVISOR_KEY_ACCOUNT, apiKey);
-          setJson('advisor', rest);
+          // Verify the key landed in the keyring before stripping localStorage.
+          // A silent failure in storeSecret would otherwise lose the key.
+          const stored = await api.loadSecret(ADVISOR_KEY_ACCOUNT);
+          if (stored === apiKey) {
+            setJson('advisor', rest);
+          }
         }
-      } catch { /* migration is best-effort */ }
+      } catch { /* migration is best-effort; key stays in localStorage */ }
     })();
   }, []);
 
@@ -139,6 +144,11 @@ export default function App() {
         <button className="primary" onClick={scan} disabled={!pickedPath || scanning}>
           <ScanLine size={14} /> {scanning ? '扫描中…' : '扫描'}
         </button>
+        {scanning && (
+          <button className="ghost danger" onClick={cancel} title="取消扫描">
+            <StopCircle size={14} /> 取消
+          </button>
+        )}
         <div className="grow" />
         <span className="muted small">
           {root ? `${formatBytes(root.size)} · ${root.file_count.toLocaleString()} 文件` : '未扫描'}

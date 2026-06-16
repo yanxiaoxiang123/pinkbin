@@ -254,6 +254,13 @@ button.ghost:active:not(:disabled) {
   transform: scale(0.97);
 }
 button.ghost.icon { padding: 7px; }
+button.ghost.danger {
+  color: var(--risk-high);
+  border-color: var(--risk-high);
+}
+button.ghost.danger:hover:not(:disabled) {
+  background: rgba(208, 74, 74, 0.08);
+}
 button.ghost.full {
   width: 100%;
   justify-content: center;

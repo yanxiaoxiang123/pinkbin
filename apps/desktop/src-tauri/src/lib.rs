@@ -13,7 +13,7 @@ use pinkbin_scaffold::{
     compile_all, detect_compiled, detect_for, expand_env, load_dir, parse_toml, CompiledScaffold,
     RecycleGranularity, Scaffold,
 };
-use pinkbin_scanner::{sample_paths, scan_with_stats, Node, ScanOptions, ScanStats};
+use pinkbin_scanner::{sample_paths, scan_with_stats, Node, ScanOptions, ScanStats, SCAN_CANCELLED};
 use pinkbin_walker::{
     find_matching_dirs, is_pruned_system_dir, mtime_older_than, path_passes_env, path_passes_wxid,
     pinkbin_walker, PRUNED_SYSTEM_DIRS,
@@ -28,6 +28,64 @@ use tauri_plugin_keyring::KeyringExt;
 /// macOS Keychain / Linux libsecret), never in the webview's localStorage.
 const KEYRING_SERVICE: &str = "com.pinkbin.desktop";
 const ADVISOR_KEY_ACCOUNT: &str = "pinkbin:advisor-key";
+
+// ── Structured command error ────────────────────────────────────────────────
+
+/// Typed error for Tauri IPC commands. Replaces `Result<T, String>` so the
+/// frontend can branch on error kind instead of parsing human-readable strings.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(tag = "kind", content = "message")]
+pub enum CommandError {
+    NotFound(String),
+    PermissionDenied(String),
+    Io(String),
+    Cancelled(String),
+    InvalidInput(String),
+    ScaffoldNotFound(String),
+    ScopeNotFound(String),
+    Other(String),
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(m) => write!(f, "{m}"),
+            Self::PermissionDenied(m) => write!(f, "{m}"),
+            Self::Io(m) => write!(f, "{m}"),
+            Self::Cancelled(m) => write!(f, "{m}"),
+            Self::InvalidInput(m) => write!(f, "{m}"),
+            Self::ScaffoldNotFound(m) => write!(f, "{m}"),
+            Self::ScopeNotFound(m) => write!(f, "{m}"),
+            Self::Other(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+impl From<String> for CommandError {
+    fn from(s: String) -> Self {
+        // Heuristic: classify common error substrings. This is intentionally
+        // lossy — the enum is the preferred path, this is a compat shim for
+        // the many `.map_err(|e| e.to_string())` call sites.
+        let lower = s.to_lowercase();
+        if lower.contains("not found") || lower.contains("does not exist") {
+            Self::NotFound(s)
+        } else if lower.contains("permission") || lower.contains("access denied") || lower.contains("admin") {
+            Self::PermissionDenied(s)
+        } else if lower.contains("cancel") {
+            Self::Cancelled(s)
+        } else {
+            Self::Other(s)
+        }
+    }
+}
+
+impl From<anyhow::Error> for CommandError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::from(e.to_string())
+    }
+}
 
 // Compile-time embed of repo-root scaffolds/. Used as the lowest-priority
 // fallback in load_all_scaffolds so a portable raw exe (no resource_dir,
@@ -56,16 +114,29 @@ async fn scan_path(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
+    scan_id: Option<String>,
 ) -> Result<Node, String> {
     let p = PathBuf::from(&path);
     let app_for_progress = app.clone();
     let app_for_stats = app.clone();
     let cmd_t0 = std::time::Instant::now();
 
+    // Register cancel flag in the shared jobs map so `cancel_job` can set it.
+    let cancel_flag: Option<Arc<AtomicBool>> = scan_id.as_ref().map(|sid| {
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .entry(sid.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    });
+
     // Compile scaffolds outside spawn_blocking so we don't carry the AppState
     // Mutex across thread boundaries. The compiled form is `Send` and used by
     // the post-scan walk to fill `Node.scaffold_id`.
     let compiled = compile_all(&state.scaffolds.lock().unwrap().clone());
+    let cancel_for_blocking = cancel_flag.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         let last_progress_emit = std::sync::atomic::AtomicU64::new(0);
@@ -89,7 +160,7 @@ async fn scan_path(
                     current_path: progress.current_path.clone(),
                 },
             );
-        });
+        }, cancel_for_blocking);
         // After the scan returns, walk the tree once to fill scaffold_id and
         // apply the depth-based breadth caps that the frontend's tagScaffolds
         // used to apply. Doing both here in one pass with pre-compiled
@@ -102,6 +173,11 @@ async fn scan_path(
     })
     .await
     .map_err(|e| e.to_string())?;
+
+    // Clean up the jobs map entry.
+    if let Some(sid) = &scan_id {
+        state.jobs.lock().unwrap().remove(sid);
+    }
 
     match result {
         Ok((node, stats, tag_ms)) => {
@@ -119,7 +195,14 @@ async fn scan_path(
             );
             Ok(node)
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg == SCAN_CANCELLED {
+                // Emit a final "cancelled" status so the frontend can react.
+                let _ = app_for_stats.emit("scan-cancelled", ());
+            }
+            Err(msg)
+        }
     }
 }
 
@@ -207,8 +290,8 @@ impl From<(u64, u64, &ScanStats)> for ScanStatsEvent {
 }
 
 #[tauri::command]
-fn list_scaffolds(state: State<'_, AppState>) -> Vec<Scaffold> {
-    state.scaffolds.lock().unwrap().clone()
+async fn list_scaffolds(state: State<'_, AppState>) -> Result<Vec<Scaffold>, CommandError> {
+    Ok(state.scaffolds.lock().unwrap().clone())
 }
 
 /// Fast size-only walk used to seed the progress-bar denominator before the
@@ -289,11 +372,9 @@ fn volume_info(path: String) -> Result<VolumeInfo, String> {
 }
 
 #[tauri::command]
-fn detect_scaffold(state: State<'_, AppState>, path: String) -> Option<String> {
-    detect_for(
-        &state.scaffolds.lock().unwrap(),
-        std::path::Path::new(&path),
-    )
+async fn detect_scaffold(state: State<'_, AppState>, path: String) -> Result<Option<String>, CommandError> {
+    let scaffolds = state.scaffolds.lock().unwrap().clone();
+    Ok(detect_for(&scaffolds, std::path::Path::new(&path)))
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -768,8 +849,10 @@ async fn advise(
 }
 
 #[tauri::command]
-fn inspect_path(path: String, sample_count: usize) -> Vec<String> {
-    sample_paths(&path, sample_count)
+async fn inspect_path(path: String, sample_count: usize) -> Vec<String> {
+    tokio::task::spawn_blocking(move || sample_paths(&path, sample_count))
+        .await
+        .unwrap_or_default()
 }
 
 /// Open the OS file manager and reveal `path`. On Windows this uses

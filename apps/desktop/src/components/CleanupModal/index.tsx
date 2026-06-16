@@ -509,7 +509,11 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
               : <span className="muted">勾选要清理的项目</span>}
           </div>
           <div className="cleanup-actions">
-            <button className="ghost" onClick={handleClose}>取消</button>
+            {running ? (
+              <button className="ghost danger" onClick={cancelJob}>停止清理</button>
+            ) : (
+              <button className="ghost" onClick={handleClose}>取消</button>
+            )}
             <button
               className={clsx('primary cleanup-execute', armed && 'armed')}
               onClick={execute}

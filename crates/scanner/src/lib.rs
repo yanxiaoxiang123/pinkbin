@@ -9,12 +9,17 @@ use pinkbin_walker::is_pruned_system_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[cfg(windows)]
 mod mft;
+
+/// Sentinel error message returned when a scan is cancelled via its cancel
+/// flag. Callers should check for this exact string to distinguish user-initiated
+/// cancellation from real errors.
+pub const SCAN_CANCELLED: &str = "scan_cancelled";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -120,15 +125,17 @@ where
     P: AsRef<Path>,
     F: Fn(&ScanProgress) + Send + Sync,
 {
-    scan_with_stats(root, opts, on_progress).map(|(n, _)| n)
+    scan_with_stats(root, opts, on_progress, None).map(|(n, _)| n)
 }
 
-/// Same as `scan_with`, but also returns phase-level timings. Internal API for
-/// the desktop app's diagnostics bar — keeps `scan` / `scan_with` unchanged.
+/// Same as `scan_with`, but also returns phase-level timings and accepts an
+/// optional cancel flag. When the flag is set to `true`, the scan aborts early
+/// and returns `Err` with message [`SCAN_CANCELLED`].
 pub fn scan_with_stats<P, F>(
     root: P,
     opts: ScanOptions,
     on_progress: F,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<(Node, ScanStats)>
 where
     P: AsRef<Path>,
@@ -215,6 +222,12 @@ where
     }
 
     stats.mode = "walkdir".into();
+    // Early cancel check before committing to a potentially slow walkdir scan.
+    if let Some(ref flag) = cancel {
+        if flag.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!(SCAN_CANCELLED));
+        }
+    }
     let files_seen = Arc::new(AtomicU64::new(0));
     let bytes_seen = Arc::new(AtomicU64::new(0));
     let last_emit = Arc::new(AtomicU64::new(0));
@@ -249,7 +262,9 @@ where
                     })
                     .collect();
                 if !subdirs.is_empty() {
-                    subdirs_map.lock().unwrap().insert(parent.to_path_buf(), subdirs);
+                    // Recover from a poisoned mutex (another rayon thread panicked
+                    // while holding the lock) instead of cascading the panic.
+                    subdirs_map.lock().unwrap_or_else(|e| e.into_inner()).insert(parent.to_path_buf(), subdirs);
                 }
 
                 children.retain(|res| {
@@ -344,13 +359,19 @@ where
                 bytes_seen: bytes_seen.load(Ordering::Relaxed),
                 current_path: path.to_string_lossy().to_string(),
             });
+            // Check cancel flag every progress tick (~5k files).
+            if let Some(ref flag) = cancel {
+                if flag.load(Ordering::Relaxed) {
+                    return Err(anyhow::anyhow!(SCAN_CANCELLED));
+                }
+            }
         }
     }
 
     // Merge subdirectory lists recorded by process_read_dir into accs.
-    // Use the lock directly (not try_unwrap) since the Arc may still have
-    // references if the jwalk iterator hasn't dropped the closure yet.
-    let subdirs = std::mem::take(&mut *subdirs_map.lock().unwrap());
+    // Recover from poisoned mutex — some entries may be missing if a rayon
+    // thread panicked, but the scan can still produce a partial tree.
+    let subdirs = std::mem::take(&mut *subdirs_map.lock().unwrap_or_else(|e| e.into_inner()));
     for (path, dirs) in subdirs {
         accs.entry(path).or_default().subdirs = dirs;
     }
