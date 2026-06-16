@@ -50,7 +50,6 @@ const tauri = {
   // the path doesn't exist on a volume, so the union lives on the canonical
   // type and the tauri side declares it honestly.
   volumeInfo: (path: string) => invoke<VolumeInfo | null>('volume_info', { path }),
-  estimateSize: (path: string) => invoke<number>('estimate_size', { path }),
   // `setAdvisor` no longer takes the API key — it's read from the OS
   // credential store on the backend side. The frontend stores the key via
   // `storeSecret` (and clears it with `deleteSecret`).
@@ -106,7 +105,6 @@ const browser = {
     mocks.execute(_scaffoldId, _scopeId, paths, reason, _dryRun),
   findScopeForPath: (path: string) => mocks.findScopeForPath(path),
   volumeInfo: () => Promise.resolve(null),
-  estimateSize: () => Promise.resolve(0),
   listSteamGames: () => Promise.resolve(mocks.STEAM_INVENTORY),
   listSteamWorkshopItems: (_libraryRoot: string, appid: number) => Promise.resolve(mocks.steamWorkshopItems(appid)),
   fetchWorkshopTitles: (ids: number[]) => Promise.resolve(mocks.workshopTitles(ids)),

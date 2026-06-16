@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 use include_dir::{include_dir, Dir};
@@ -100,7 +100,7 @@ struct ScanProgressEvent {
 }
 
 struct AppState {
-    scaffolds: Mutex<Vec<Scaffold>>,
+    scaffolds: RwLock<Vec<Scaffold>>,
     advisor: Mutex<Option<Provider>>,
     quarantine_root: PathBuf,
     undo_log: PathBuf,
@@ -133,9 +133,9 @@ async fn scan_path(
     });
 
     // Compile scaffolds outside spawn_blocking so we don't carry the AppState
-    // Mutex across thread boundaries. The compiled form is `Send` and used by
-    // the post-scan walk to fill `Node.scaffold_id`.
-    let compiled = compile_all(&state.scaffolds.lock().unwrap().clone());
+    // RwLock read guard is !Send, so compile outside spawn_blocking and
+    // drop the guard before entering the blocking thread.
+    let compiled = compile_all(&state.scaffolds.read().unwrap());
     let cancel_for_blocking = cancel_flag.clone();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -291,28 +291,9 @@ impl From<(u64, u64, &ScanStats)> for ScanStatsEvent {
 
 #[tauri::command]
 async fn list_scaffolds(state: State<'_, AppState>) -> Result<Vec<Scaffold>, CommandError> {
-    Ok(state.scaffolds.lock().unwrap().clone())
+    Ok(state.scaffolds.read().unwrap().clone())
 }
 
-/// Fast size-only walk used to seed the progress-bar denominator before the
-/// real scan starts. Single jwalk pass, sums file sizes, no other state.
-#[tauri::command]
-async fn estimate_size(path: String) -> Result<u64, String> {
-    let p = PathBuf::from(&path);
-    tokio::task::spawn_blocking(move || -> u64 {
-        let mut total: u64 = 0;
-        for entry in pinkbin_walker(&p).into_iter().flatten() {
-            if entry.file_type().is_file() {
-                if let Ok(md) = entry.metadata() {
-                    total = total.saturating_add(md.len());
-                }
-            }
-        }
-        total
-    })
-    .await
-    .map_err(|e| e.to_string())
-}
 
 #[derive(serde::Serialize, Clone)]
 struct VolumeInfo {
@@ -373,7 +354,7 @@ fn volume_info(path: String) -> Result<VolumeInfo, String> {
 
 #[tauri::command]
 async fn detect_scaffold(state: State<'_, AppState>, path: String) -> Result<Option<String>, CommandError> {
-    let scaffolds = state.scaffolds.lock().unwrap().clone();
+    let scaffolds = state.scaffolds.read().unwrap();
     Ok(detect_for(&scaffolds, std::path::Path::new(&path)))
 }
 
@@ -465,7 +446,7 @@ async fn scope_sizes(
 ) -> Result<Vec<ScopeSize>, String> {
     let scaffold = state
         .scaffolds
-        .lock()
+        .read()
         .unwrap()
         .iter()
         .find(|s| s.id == scaffold_id)
@@ -624,7 +605,7 @@ async fn execute_scope(
     job_id: Option<String>,
 ) -> Result<Vec<UndoEntry>, String> {
     let (scaffold, scope) = {
-        let scaffolds = state.scaffolds.lock().unwrap();
+        let scaffolds = state.scaffolds.read().unwrap();
         let sc = scaffolds
             .iter()
             .find(|s| s.id == scaffold_id)
@@ -922,7 +903,7 @@ async fn execute_plan(
     job_id: Option<String>,
 ) -> Result<Vec<UndoEntry>, String> {
     let (scaffold, scope) = {
-        let scaffolds = state.scaffolds.lock().unwrap();
+        let scaffolds = state.scaffolds.read().unwrap();
         let sc = scaffolds
             .iter()
             .find(|s| s.id == scaffold_id)
@@ -1033,12 +1014,12 @@ async fn find_scope_for_path(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<Vec<ScopeMatch>, String> {
-    let scaffolds = state.scaffolds.lock().unwrap().clone();
+    let scaffolds = state.scaffolds.read().unwrap();
     let normalized = PathBuf::from(&path)
         .to_string_lossy()
         .replace('\\', "/");
     let mut out = Vec::new();
-    for s in &scaffolds {
+    for s in scaffolds.iter() {
         for sc in &s.scopes {
             match compile_scope_set(&sc.glob) {
                 Ok(set) if set.is_match(&normalized) => {
@@ -1636,7 +1617,7 @@ pub fn run() {
             tracing::info!("loaded {} scaffolds", scaffolds.len());
 
             app.manage(AppState {
-                scaffolds: Mutex::new(scaffolds),
+                scaffolds: RwLock::new(scaffolds),
                 advisor: Mutex::new(None),
                 quarantine_root,
                 undo_log,
@@ -1646,7 +1627,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             scan_path,
-            estimate_size,
             list_scaffolds,
             detect_scaffold,
             scope_sizes,

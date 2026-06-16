@@ -64,6 +64,28 @@ export interface ScopeSizesState {
 }
 
 /**
+ * Find the common parent path of all matches. If all matches share an
+ * ancestor, a single scope_sizes IPC covers them all instead of N
+ * parallel calls each re-walking a subtree.
+ */
+function commonAncestor(paths: string[]): string | null {
+  if (paths.length <= 1) return paths[0] ?? null;
+  const sep = '\\';
+  const parts = paths.map((p) => p.split(sep));
+  const minLen = Math.min(...parts.map((p) => p.length));
+  const common: string[] = [];
+  for (let i = 0; i < minLen; i++) {
+    const seg = parts[0]![i]!;
+    if (parts.every((p) => p[i] === seg)) {
+      common.push(seg);
+    } else {
+      break;
+    }
+  }
+  return common.length > 0 ? common.join(sep) : null;
+}
+
+/**
  * Live preview of per-scope sizes for the current filter set. The
  * debounce keeps us from spamming the backend when the user drags the
  * days input; cancellation guards against the previous run landing
@@ -95,13 +117,20 @@ export function useScopeSizes(
     const timer = window.setTimeout(() => {
       if (cancelled) return;
       setLoading(true);
-      Promise.all(
-        matches.map((m) =>
-          api
-            .scopeSizes(scaffoldId, m.path, filters.daysByScope, filters.wxidFilter)
-            .catch(() => [] as ScopeSize[]),
-        ),
-      )
+      // Use common ancestor for a single IPC instead of per-match fanout.
+      // Falls back to per-match if paths share no common prefix.
+      const paths = matches.map((m) => m.path);
+      const root = commonAncestor(paths);
+      const call = root
+        ? api.scopeSizes(scaffoldId, root, filters.daysByScope, filters.wxidFilter)
+            .then((rows) => [rows])
+        : Promise.all(
+            paths.map((p) =>
+              api.scopeSizes(scaffoldId, p, filters.daysByScope, filters.wxidFilter)
+                .catch(() => [] as ScopeSize[]),
+            ),
+          );
+      call
         .then((rowsList) => {
           if (cancelled) return;
           setSizes(aggregateScopeSizes(rowsList));

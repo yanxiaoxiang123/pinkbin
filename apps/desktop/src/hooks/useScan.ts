@@ -101,14 +101,10 @@ export function useScan(pickedPath: string) {
         api.volumeInfo(pickedPath)
           .then((info) => { if (info) setScanTotalBytes(info.used_bytes); })
           .catch(() => {});
-      } else {
-        // Subfolder: run a fast size-only walk in parallel with the real scan.
-        // The real scan is doing the same work either way; this just gives the
-        // progress bar an exact denominator a bit ahead of completion.
-        api.estimateSize(pickedPath)
-          .then((bytes) => { if (bytes > 0) setScanTotalBytes(bytes); })
-          .catch(() => {});
       }
+      // Subfolders: no separate size walk. The progress bar uses the
+      // indeterminate variant until scan completes, then root.size is
+      // available. This avoids a redundant 2x I/O on every scan.
     }
 
     const tTotal0 = performance.now();
@@ -119,6 +115,9 @@ export function useScan(pickedPath: string) {
 
       // If this scan was superseded by a newer start() call, discard result.
       if (activeScanId.current !== scanId) return;
+
+      // For subfolders that skipped estimateSize, seed the denominator now.
+      setScanTotalBytes((prev) => prev ?? node.size);
 
       const tSet0 = performance.now();
       setRoot(node);
