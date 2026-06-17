@@ -53,7 +53,7 @@ describe('setScaffolds', () => {
     const sc = [{ id: 'test', name: 'Test', risk: 'low' as const, disclaimer: '', detect: [], match: { name_contains: [] }, scopes: [] }];
     useStore.getState().setScaffolds(sc);
     expect(useStore.getState().scaffolds).toHaveLength(1);
-    expect(useStore.getState().scaffolds[0].id).toBe('test');
+    expect(useStore.getState().scaffolds[0]!.id).toBe('test');
   });
 });
 
@@ -61,15 +61,15 @@ describe('chat actions', () => {
   it('pushChatTurn appends a turn', () => {
     useStore.getState().pushChatTurn({ id: '1', role: 'user', text: 'hello' });
     expect(useStore.getState().chatTurns).toHaveLength(1);
-    expect(useStore.getState().chatTurns[0].text).toBe('hello');
+    expect(useStore.getState().chatTurns[0]!.text).toBe('hello');
   });
 
   it('patchChatTurn updates a turn by id', () => {
     useStore.getState().pushChatTurn({ id: '1', role: 'assistant', text: 'old', pending: true });
     useStore.getState().patchChatTurn('1', { text: 'new', pending: false });
     const turn = useStore.getState().chatTurns[0];
-    expect(turn.text).toBe('new');
-    expect(turn.pending).toBe(false);
+    expect(turn!.text).toBe('new');
+    expect(turn!.pending).toBe(false);
   });
 
   it('setChatBusy toggles busy flag', () => {
@@ -115,18 +115,18 @@ describe('toast actions', () => {
     useStore.getState().pushToast({ text: 'hello', type: 'success' });
     const toasts = useStore.getState().toasts;
     expect(toasts).toHaveLength(1);
-    expect(toasts[0].text).toBe('hello');
-    expect(toasts[0].type).toBe('success');
-    expect(toasts[0].id).toBeTruthy();
+    expect(toasts[0]!.text).toBe('hello');
+    expect(toasts[0]!.type).toBe('success');
+    expect(toasts[0]!.id).toBeTruthy();
   });
 
   it('popToast removes a toast by id', () => {
     useStore.getState().pushToast({ text: 'a', type: 'info' });
     useStore.getState().pushToast({ text: 'b', type: 'error' });
-    const id = useStore.getState().toasts[0].id;
+    const id = useStore.getState().toasts[0]!.id;
     useStore.getState().popToast(id);
     expect(useStore.getState().toasts).toHaveLength(1);
-    expect(useStore.getState().toasts[0].text).toBe('b');
+    expect(useStore.getState().toasts[0]!.text).toBe('b');
   });
 });
 

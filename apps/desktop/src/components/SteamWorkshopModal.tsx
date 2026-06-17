@@ -233,7 +233,7 @@ export function SteamWorkshopModal({
               )}
               <ul className="steam-workshop-list">
                 {sorted.map((it) => (
-                  <WorkshopRow key={it.id} item={it} title={titles[it.id]} />
+                  <WorkshopRow key={it.id} item={it} title={titles[it.id] ?? ''} />
                 ))}
               </ul>
             </>

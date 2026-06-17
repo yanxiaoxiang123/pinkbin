@@ -39,8 +39,8 @@ const tauri = {
   scan: (path: string, scanId?: string) => invoke<Node>('scan_path', { path, scanId: scanId ?? null }),
   listScaffolds: () => invoke<Scaffold[]>('list_scaffolds'),
   getAppVersion: () => invoke<string>('get_app_version'),
-  scopeSizes: (scaffoldId: string, rootPath: string, scopeDays?: Record<string, number>, wxidFilter?: string[], envFilter?: string[]) =>
-    invoke<ScopeSize[]>('scope_sizes', { scaffoldId, rootPath, scopeDays: scopeDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
+  scopeSizes: (scaffoldId: string, rootPaths: string[], scopeDays?: Record<string, number>, wxidFilter?: string[], envFilter?: string[]) =>
+    invoke<ScopeSize[]>('scope_sizes', { scaffoldId, rootPaths, scopeDays: scopeDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null }),
   executeScope: (scaffoldId: string, scopeId: string, rootPath: string, dryRun: boolean, olderThanDays?: number, wxidFilter?: string[], envFilter?: string[], jobId?: string) =>
     invoke<UndoEntry[]>('execute_scope', { scaffoldId, scopeId, rootPath, dryRun, olderThanDays: olderThanDays ?? null, wxidFilter: wxidFilter ?? null, envFilter: envFilter ?? null, jobId: jobId ?? null }),
   listCondaEnvs: (condaRoot: string) => invoke<CondaEnv[]>('list_conda_envs', { condaRoot }),
@@ -93,8 +93,8 @@ const browser = {
   scan: async (_path: string, _scanId?: string) => (await getMocks()).scan(_path),
   listScaffolds: async () => (await getMocks()).SCAFFOLDS,
   getAppVersion: () => Promise.resolve('0.0.0'),
-  scopeSizes: async (_scaffoldId: string, _rootPath: string, _scopeDays?: Record<string, number>, _wxidFilter?: string[], _envFilter?: string[]) =>
-    (await getMocks()).scopeSizes(_scaffoldId, _rootPath),
+  scopeSizes: async (_scaffoldId: string, _rootPaths: string[], _scopeDays?: Record<string, number>, _wxidFilter?: string[], _envFilter?: string[]) =>
+    (await getMocks()).scopeSizes(_scaffoldId, _rootPaths[0] ?? ''),
   executeScope: (_scaffoldId: string, _scopeId: string, _rootPath: string, _dryRun: boolean, _olderThanDays?: number, _wxidFilter?: string[], _envFilter?: string[]) =>
     Promise.resolve([] as UndoEntry[]),
   listCondaEnvs: (_condaRoot: string) => Promise.resolve([] as CondaEnv[]),

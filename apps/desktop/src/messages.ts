@@ -87,6 +87,12 @@ const zh: Record<string, string> = {
   'chat.dropHint':            '先去设置里配 AI',
   'chat.attachTitle':         '加图片（也可以粘贴/拖进来）',
   'chat.attachLabel':         '添加图片',
+  'chat.scanHint':            '扫一个磁盘，AI 自动给整体解析',
+  'chat.files':               '{n} 文件',
+  'chat.scrollTitle':         '滚动到底部',
+  'chat.scrollLabel':         '滚动到底部',
+  'chat.removeLabel':         '移除 {name}',
+  'chat.removeImageLabel':    '移除图片 {name}',
 
   // ── Studio.tsx ───────────────────────────────────────────────────────────
   'studio.hidden':            '已隐藏（pinkbin.hideStudio=1）',
@@ -98,6 +104,10 @@ const zh: Record<string, string> = {
   'studio.pruneTitle':        '清理超过 7 天的 quarantine 文件',
   'studio.pruneRunning':      '清理中…',
   'studio.pruneIdle':         '清空 quarantine',
+  'studio.pruneSuccess':      '已清理 {count} 个过期文件 · {size}',
+  'studio.pruneEmpty':        'quarantine 目录没有过期文件',
+  'studio.pruneFail':         '清理失败：{error}',
+  'studio.file':              '文件',
   'studio.loading':           '脚本加载中…',
   'studio.featured':          '推荐',
   'studio.more':              '更多',

@@ -273,7 +273,7 @@ export async function runCompletion(
   const body = cfg.formatRequest({
     system: req.system,
     user: req.user,
-    images: req.images,
+    images: req.images ?? [],
     jsonMode: Boolean(req.jsonMode),
     model: settings.model,
     stream,
@@ -285,7 +285,7 @@ export async function runCompletion(
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: req.signal,
+    signal: req.signal ?? null,
   });
   if (!r.ok) {
     const errText = await r.text().catch(() => '');
@@ -331,13 +331,9 @@ export async function overviewChat(
 ): Promise<string> {
   return runWithLoadedSettings({
     system: OVERVIEW_SYSTEM,
-    // `buildOverviewSummary` is also annotated with PII paths (root +
-    // top_entries[].path). Walk the object once and redact every string
-    // value that looks like a path. We only touch the shape we know the
-    // helper produces — see chatUtils.ts.
     user: JSON.stringify(redactOverviewSummary(summary), null, 2),
-    onChunk: opts?.onChunk,
-    signal: opts?.signal,
+    ...(opts?.onChunk ? { onChunk: opts.onChunk } : {}),
+    ...(opts?.signal ? { signal: opts.signal } : {}),
   });
 }
 
@@ -351,9 +347,9 @@ export async function freeChat(
   return runWithLoadedSettings({
     system: CHAT_SYSTEM,
     user: userText,
-    images,
-    onChunk: opts?.onChunk,
-    signal: opts?.signal,
+    ...(images ? { images } : {}),
+    ...(opts?.onChunk ? { onChunk: opts.onChunk } : {}),
+    ...(opts?.signal ? { signal: opts.signal } : {}),
   });
 }
 
@@ -443,7 +439,13 @@ async function runWithLoadedSettings(
   if (!key && settings.provider !== 'ollama') {
     throw new Error('AI 未配置 — 在右上角的设置里填一个 API key');
   }
-  return runCompletion(settings, key ?? '', args);
+  return runCompletion(settings, key ?? '', {
+    system: args.system,
+    user: args.user,
+    images: args.images ?? [],
+    ...(args.onChunk ? { onChunk: args.onChunk } : {}),
+    ...(args.signal ? { signal: args.signal } : {}),
+  });
 }
 
 function extractField(data: unknown, path: ReadonlyArray<string | number>): string {

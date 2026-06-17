@@ -69,7 +69,10 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
   const [selectedEnvs, setSelectedEnvs] = useState<Set<string>>(new Set());
 
   // ── Scope sizes (live preview, refetched when filters change) ──
-  const scopeFilters: ScopeSizesFilters = { daysByScope, wxidFilter: wxidFilterArg };
+  const scopeFilters: ScopeSizesFilters = {
+    daysByScope,
+    ...(wxidFilterArg ? { wxidFilter: wxidFilterArg } : {}),
+  };
   const { sizes: scopeSizes, loading: scopeLoading, error: scopeSizesError, refresh: refreshScopeSizes } = useScopeSizes(
     sc.id,
     matches,
@@ -125,7 +128,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
     let cancelled = false;
     setCondaEnvsLoading(true);
     api
-      .listCondaEnvs(matches[0].path)
+      .listCondaEnvs(matches[0]!.path)
       .then((envs) => {
         if (cancelled) return;
         setCondaEnvs(envs);
@@ -257,7 +260,7 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
         }
         scopeIds = ['envs-stale'];
         const entries = await api.executeScope(
-          sc.id, 'envs-stale', matches[0].path, true,
+          sc.id, 'envs-stale', matches[0]!.path, true,
           undefined, undefined, [...selectedEnvs],
         );
         for (const e of entries) {
@@ -338,11 +341,11 @@ export function CleanupModal({ scaffold: sc, matches, onClose, onCleaned }: Prop
       if (isConda) {
         const envFilterArg = [...selectedEnvs];
         const entries = await api.executeScope(
-          sc.id, 'envs-stale', matches[0].path, false,
+          sc.id, 'envs-stale', matches[0]!.path, false,
           undefined, undefined, envFilterArg, jobId,
         );
         totalEntries = entries.length;
-        const refreshed = await api.listCondaEnvs(matches[0].path).catch(() => [] as CondaEnv[]);
+        const refreshed = await api.listCondaEnvs(matches[0]!.path).catch(() => [] as CondaEnv[]);
         setCondaEnvs(refreshed);
         setSelectedEnvs(new Set(refreshed.filter((e) => e.default_checked).map((e) => e.name)));
       } else {

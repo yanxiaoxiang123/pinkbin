@@ -40,9 +40,10 @@ const CELLS: { x: number; y: number; c: string }[] = (() => {
   const out: { x: number; y: number; c: string }[] = [];
   for (let y = 0; y < ROWS.length; y++) {
     const row = ROWS[y];
+    if (!row) continue;
     for (let x = 0; x < row.length; x++) {
       const ch = row[x];
-      if (COLOR[ch]) out.push({ x, y, c: COLOR[ch] });
+      if (ch && COLOR[ch]) out.push({ x, y, c: COLOR[ch] });
     }
   }
   return out;

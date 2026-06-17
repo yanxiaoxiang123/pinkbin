@@ -97,6 +97,6 @@ export function redactAdvisorRequest(
     scaffold_hint:
       typeof req.scaffold_hint === 'string'
         ? redactSample(req.scaffold_hint)
-        : req.scaffold_hint,
+        : req.scaffold_hint ?? null,
   };
 }

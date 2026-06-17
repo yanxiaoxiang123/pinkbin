@@ -8,6 +8,7 @@ import type { Node, Scaffold } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ContextMenu, type ContextMenuState } from './ContextMenu';
 import { getBool } from '../persist';
+import { t } from '../messages';
 import './Studio.css';
 
 const CleanupModal = lazy(() => import('./CleanupModal').then((m) => ({ default: m.CleanupModal })));
@@ -67,11 +68,11 @@ export function Studio() {
       const r = await api.pruneQuarantine(7);
       setPruneMsg(
         r.removed_count > 0
-          ? `已清理 ${r.removed_count} 个过期文件 · ${formatBytes(r.removed_bytes)}`
-          : 'quarantine 目录没有过期文件'
+          ? t('studio.pruneSuccess', { count: r.removed_count, size: formatBytes(r.removed_bytes) })
+          : t('studio.pruneEmpty')
       );
     } catch (e) {
-      setPruneMsg(`清理失败：${errorMessage(e)}`);
+      setPruneMsg(t('studio.pruneFail', { error: errorMessage(e) }));
     } finally {
       setPruneLoading(false);
     }
@@ -136,7 +137,7 @@ export function Studio() {
       <div className="studio">
         <div className="studio-head">
           <span>Studio</span>
-          <span className="muted small">已隐藏（pinkbin.hideStudio=1）</span>
+          <span className="muted small">{t('studio.hidden')}</span>
         </div>
       </div>
     );
@@ -150,31 +151,31 @@ export function Studio() {
       <div className="studio-head">
         <span>Studio</span>
         <div className="studio-head-actions">
-          <span className="muted small">{allCards.length} 个脚本</span>
+          <span className="muted small">{t('studio.scripts', { n: allCards.length })}</span>
           {lastUndo && (
             <button
               className="ghost studio-undo-btn"
               onClick={handleUndo}
               title={
                 lastUndo.action === 'recycle'
-                  ? `打开回收站还原 · ${lastUndo.reason}`
+                  ? t('studio.undo.recycle', { reason: lastUndo.reason })
                   : lastUndo.action === 'quarantine'
-                    ? `文件已移入 quarantine · ${lastUndo.reason}`
-                    : `文件已永久删除 · ${lastUndo.reason}`
+                    ? t('studio.undo.quarantine', { reason: lastUndo.reason })
+                    : t('studio.undo.delete', { reason: lastUndo.reason })
               }
             >
               <Undo2 size={12} />
-              撤销 · {lastUndo.reason.length > 20 ? lastUndo.reason.slice(0, 20) + '…' : lastUndo.reason}
+              {t('studio.undo', { label: lastUndo.reason.length > 20 ? lastUndo.reason.slice(0, 20) + '…' : lastUndo.reason })}
             </button>
           )}
           <button
             className="ghost studio-prune-btn"
             onClick={handlePruneQuarantine}
             disabled={pruneLoading}
-            title="清理超过 7 天的 quarantine 文件"
+            title={t('studio.pruneTitle')}
           >
             <ArchiveX size={12} />
-            {pruneLoading ? '清理中…' : '清空 quarantine'}
+            {pruneLoading ? t('studio.pruneRunning') : t('studio.pruneIdle')}
           </button>
         </div>
       </div>
@@ -184,21 +185,21 @@ export function Studio() {
       )}
 
       {allCards.length === 0 && !scanInProgress && (
-        <div className="studio-empty muted">脚本加载中…</div>
+        <div className="studio-empty muted">{t('studio.loading')}</div>
       )}
 
-      <div className="studio-section-label">推荐</div>
+      <div className="studio-section-label">{t('studio.featured')}</div>
       <div className="studio-grid">
-        <ErrorBoundary fallbackLabel="Steam Inspector 卡片渲染失败">
+        <ErrorBoundary fallbackLabel={t('studio.steamCardFail')}>
           <ToolCard
             icon={<Gamepad2 size={14} />}
-            name="Steam Inspector"
-            blurb="哪些游戏好久没玩 · 一键唤起 Steam 卸载"
+            name={t('studio.steam.name')}
+            blurb={t('studio.steam.blurb')}
             onClick={() => setOpenTool('steam-inspector')}
           />
         </ErrorBoundary>
         {featured.map((c) => (
-          <ErrorBoundary key={c.scaffold.id} fallbackLabel={`${c.scaffold.name} 卡片渲染失败`}>
+          <ErrorBoundary key={c.scaffold.id} fallbackLabel={t('studio.cardRenderFail', { name: c.scaffold.name })}>
             <Card card={c} onAsk={() => requestStudio(c.scaffold.id)} />
           </ErrorBoundary>
         ))}
@@ -206,10 +207,10 @@ export function Studio() {
 
       {others.length > 0 && (
         <>
-          <div className="studio-section-label">更多</div>
+          <div className="studio-section-label">{t('studio.more')}</div>
           <div className="studio-grid">
             {others.map((c) => (
-              <ErrorBoundary key={c.scaffold.id} fallbackLabel={`${c.scaffold.name} 卡片渲染失败`}>
+              <ErrorBoundary key={c.scaffold.id} fallbackLabel={t('studio.cardRenderFail', { name: c.scaffold.name })}>
                 <Card card={c} onAsk={() => requestStudio(c.scaffold.id)} />
               </ErrorBoundary>
             ))}
@@ -218,7 +219,7 @@ export function Studio() {
       )}
 
       {openTool === 'steam-inspector' && (
-        <Suspense fallback={<div className="modal-bg">加载中…</div>}>
+        <Suspense fallback={<div className="modal-bg">{t('studio.loadingModal')}</div>}>
           <SteamInspectorModal onClose={() => setOpenTool(null)} />
         </Suspense>
       )}
@@ -276,12 +277,12 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
       y: e.clientY,
       items: [
         {
-          label: '在文件管理器中打开',
+          label: t('studio.ctxOpen'),
           icon: <FolderOpen size={12} />,
           onClick: () => { api.revealInExplorer(p).catch(() => { /* path may have been deleted */ }); },
         },
         {
-          label: '复制路径',
+          label: t('studio.ctxCopy'),
           icon: <Copy size={12} />,
           onClick: () => { navigator.clipboard?.writeText(p).catch(() => { /* ignore */ }); },
         },
@@ -313,8 +314,8 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
           <div className="studio-card-name">{sc.name}</div>
           <div className="studio-card-meta">
             {detected
-              ? <><Sparkles size={10} /> {formatBytes(card.totalSize)}{matches.length > 1 && <> · {matches.length} 个位置</>}</>
-              : <>未扫到 · 用脚本默认路径</>}
+              ? <><Sparkles size={10} /> {formatBytes(card.totalSize)}{matches.length > 1 && <> · {t('studio.positions', { n: matches.length })}</>}</>
+              : <>{t('studio.notDetected')}</>}
           </div>
         </div>
       </button>
@@ -324,7 +325,7 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
           {detected ? (
             <>
               <div className="studio-detail-row">
-                <span className="studio-detail-label">路径</span>
+                <span className="studio-detail-label">{t('studio.path')}</span>
                 <div className="studio-detail-paths">
                   {matches.map((m) => (
                     <span
@@ -337,7 +338,7 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
                         e.dataTransfer.effectAllowed = 'copy';
                       }}
                       onContextMenu={(e) => openCtx(e, m.path)}
-                      title="拖到中间问 AI · 右键查看选项"
+                      title={t('studio.dragHint')}
                     >
                       {m.path}
                       {matches.length > 1 && (
@@ -350,17 +351,17 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
                 </div>
               </div>
               <div className="studio-detail-row">
-                <span className="studio-detail-label">大小</span>
+                <span className="studio-detail-label">{t('studio.size')}</span>
                 <span className="mono-num">
-                  {formatBytes(card.totalSize)} · {card.totalFiles.toLocaleString()} 文件
-                  {matches.length > 1 && <span className="muted small studio-detail-suffix">（{matches.length} 处合计）</span>}
+                  {t('studio.sizeDetail', { size: formatBytes(card.totalSize), files: card.totalFiles.toLocaleString() })}
+                  {matches.length > 1 && <span className="muted small studio-detail-suffix">{t('studio.sizeCombined', { n: matches.length })}</span>}
                 </span>
               </div>
 
               {topChildrenAll.length > 0 && (
                 <>
                   <div className="studio-detail-label studio-top-children-head">
-                    <span>占用最大的子项</span>
+                    <span>{t('studio.topChildren')}</span>
                     {topChildrenAll.length > 3 && (
                       <button
                         type="button"
@@ -368,8 +369,8 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
                         onClick={() => setShowAllChildren((v) => !v)}
                       >
                         {showAllChildren
-                          ? '收起'
-                          : `展开全部（还有 ${hiddenChildrenCount}）`}
+                          ? t('studio.collapse')
+                          : t('studio.expandAll', { n: hiddenChildrenCount })}
                       </button>
                     )}
                   </div>
@@ -384,7 +385,7 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
                           e.dataTransfer.effectAllowed = 'copy';
                         }}
                         onContextMenu={(e) => openCtx(e, c.path)}
-                        title={c.path + '  ·  右键查看选项'}
+                        title={c.path + '  ·  ' + t('studio.ctxHint')}
                       >
                         <span className="studio-child-name">{c.is_dir ? '📁' : '📄'} {c.name}</span>
                         <span className="mono-num">{formatBytes(c.size)}</span>
@@ -399,25 +400,25 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
                   className="primary studio-cleanup-btn"
                   onClick={() => setShowCleanup(true)}
                   disabled={card.totalSize === 0}
-                  title={card.totalSize === 0 ? '目录为空，无需清理' : undefined}
+                  title={card.totalSize === 0 ? t('studio.emptyDirTitle') : undefined}
                 >
-                  <Trash2 size={12} /> {card.totalSize === 0 ? '空目录' : '配置清理…'}
+                  <Trash2 size={12} /> {card.totalSize === 0 ? t('studio.emptyDir') : t('studio.configureClean')}
                 </button>
                 <button className="secondary studio-ask-btn" onClick={onAsk}>
-                  <MessageSquare size={12} /> 问 AI
+                  <MessageSquare size={12} /> {t('studio.askAI')}
                 </button>
               </div>
             </>
           ) : (
             <>
-              <div className="studio-detail-label">脚本默认匹配路径</div>
+              <div className="studio-detail-label">{t('studio.defaultPaths')}</div>
               <ul className="studio-children muted small">
                 {sc.detect.slice(0, 4).map((p) => <li key={p}>{p}</li>)}
               </ul>
-              <div className="studio-detail-label">说明</div>
+              <div className="studio-detail-label">{t('studio.description')}</div>
               <p className="muted small studio-disclaimer-text">{sc.disclaimer}</p>
               <button className="primary studio-ask-btn studio-top-cta" onClick={onAsk}>
-                <MessageSquare size={12} /> 问 AI：它一般在哪、能不能删
+                <MessageSquare size={12} /> {t('studio.askAIHint')}
               </button>
             </>
           )}
@@ -425,7 +426,7 @@ function Card({ card, onAsk }: { card: CardData; onAsk: () => void }) {
       )}
 
       {showCleanup && detected && (
-        <Suspense fallback={<div className="modal-bg">加载中…</div>}>
+        <Suspense fallback={<div className="modal-bg">{t('studio.loadingModal')}</div>}>
           <CleanupModal
             scaffold={sc}
             matches={matches}

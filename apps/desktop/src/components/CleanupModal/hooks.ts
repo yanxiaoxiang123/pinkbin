@@ -63,28 +63,6 @@ export interface ScopeSizesState {
 }
 
 /**
- * Find the common parent path of all matches. If all matches share an
- * ancestor, a single scope_sizes IPC covers them all instead of N
- * parallel calls each re-walking a subtree.
- */
-function commonAncestor(paths: string[]): string | null {
-  if (paths.length <= 1) return paths[0] ?? null;
-  const sep = '\\';
-  const parts = paths.map((p) => p.split(sep));
-  const minLen = Math.min(...parts.map((p) => p.length));
-  const common: string[] = [];
-  for (let i = 0; i < minLen; i++) {
-    const seg = parts[0]![i]!;
-    if (parts.every((p) => p[i] === seg)) {
-      common.push(seg);
-    } else {
-      break;
-    }
-  }
-  return common.length > 0 ? common.join(sep) : null;
-}
-
-/**
  * Live preview of per-scope sizes for the current filter set. The
  * debounce keeps us from spamming the backend when the user drags the
  * days input; cancellation guards against the previous run landing
@@ -104,9 +82,6 @@ export function useScopeSizes(
   const [sizes, setSizes] = useState<ScopeSize[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Bumping this forces the effect to refetch even when the dep signature
-  // (matchKey/daysKey/wxidKey) hasn't changed — used after a real delete
-  // so the size pills reflect the post-cleanup state immediately.
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
@@ -116,23 +91,12 @@ export function useScopeSizes(
     const timer = window.setTimeout(() => {
       if (cancelled) return;
       setLoading(true);
-      // Use common ancestor for a single IPC instead of per-match fanout.
-      // Falls back to per-match if paths share no common prefix.
-      const paths = matches.map((m) => m.path);
-      const root = commonAncestor(paths);
-      const call = root
-        ? api.scopeSizes(scaffoldId, root, filters.daysByScope, filters.wxidFilter)
-            .then((rows) => [rows])
-        : Promise.all(
-            paths.map((p) =>
-              api.scopeSizes(scaffoldId, p, filters.daysByScope, filters.wxidFilter)
-                .catch(() => [] as ScopeSize[]),
-            ),
-          );
-      call
-        .then((rowsList) => {
+      const rootPaths = matches.map((m) => m.path);
+      api
+        .scopeSizes(scaffoldId, rootPaths, filters.daysByScope, filters.wxidFilter)
+        .then((rows) => {
           if (cancelled) return;
-          setSizes(aggregateScopeSizes(rowsList));
+          setSizes(rows);
         })
         .catch((e) => { if (!cancelled) setError(`扫描 scope 大小失败：${errorMessage(e)}`); })
         .finally(() => { if (!cancelled) setLoading(false); });
@@ -142,30 +106,6 @@ export function useScopeSizes(
   }, [enabled, matchKey, scaffoldId, daysKey, wxidKey, refreshNonce]);
 
   return { sizes, loading, error, refresh: () => setRefreshNonce((n) => n + 1) };
-}
-
-export function aggregateScopeSizes(rowsList: ScopeSize[][]): ScopeSize[] {
-  const merged = new Map<string, ScopeSize>();
-  for (const rows of rowsList) {
-    for (const r of rows) {
-      const prev = merged.get(r.scope_id);
-      if (prev) {
-        prev.bytes += r.bytes;
-        prev.file_count += r.file_count;
-        prev.total_bytes += r.total_bytes;
-        prev.total_files += r.total_files;
-      } else {
-        merged.set(r.scope_id, {
-          scope_id: r.scope_id,
-          bytes: r.bytes,
-          file_count: r.file_count,
-          total_bytes: r.total_bytes,
-          total_files: r.total_files,
-        });
-      }
-    }
-  }
-  return [...merged.values()];
 }
 
 // ── misc small helpers used by the modal ────────────────────────────────

@@ -172,11 +172,11 @@ export function SteamInspector() {
       if (allGames.length === 0) return;
       const idx = selectedAppid != null ? allGames.findIndex((g) => g.appid === selectedAppid) : -1;
       const nextIdx = Math.max(0, Math.min(allGames.length - 1, idx + delta));
-      setSelectedAppid(allGames[nextIdx].appid);
+      setSelectedAppid(allGames[nextIdx]!.appid);
       // Scroll into view
       requestAnimationFrame(() => {
         listRef.current
-          ?.querySelector(`[data-appid="${allGames[nextIdx].appid}"]`)
+          ?.querySelector(`[data-appid="${allGames[nextIdx]!.appid}"]`)
           ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       });
     },
@@ -216,7 +216,7 @@ export function SteamInspector() {
         case 'Enter':
           e.preventDefault();
           if (selectedAppid != null) setSelectedAppid(null);
-          else if (allGames.length > 0) setSelectedAppid(allGames[0].appid);
+          else if (allGames.length > 0) setSelectedAppid(allGames[0]!.appid);
           break;
         case 'Escape':
           e.preventDefault();
@@ -235,7 +235,8 @@ export function SteamInspector() {
         case '3':
         case '4': {
           const idx = parseInt(e.key, 10) - 1;
-          setPivot(PIVOT_ORDER[idx]);
+          const p = PIVOT_ORDER[idx];
+          if (p) setPivot(p);
           break;
         }
       }

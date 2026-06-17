@@ -14,6 +14,7 @@ import { useOverview } from '../hooks/useOverview';
 import { useChat } from '../hooks/useChat';
 import { useImageDrop } from '../hooks/useImageDrop';
 import type { AdvisorResponse, Node } from '../types';
+import { t } from '../messages';
 import './ChatPanel.css';
 
 export function ChatPanel() {
@@ -113,16 +114,16 @@ export function ChatPanel() {
         <Sparkles size={15} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="chat-title">
-            {root ? (root.name || root.path) : 'Pinkbin AI'}
+            {root ? (root.name || root.path) : t('chat.title')}
           </div>
           <div className="chat-sub">
             {root
-              ? `${root.path} · ${formatBytes(root.size)} · ${root.file_count.toLocaleString()} 文件`
-              : '扫一个磁盘，AI 自动给整体解析'}
+              ? `${root.path} · ${formatBytes(root.size)} · ${t('chat.files', { n: root.file_count.toLocaleString() })}`
+              : t('chat.scanHint')}
           </div>
         </div>
         {chatTurns.length > 0 && (
-          <button className="ghost icon" onClick={resetChat} title="清空" aria-label="清空对话"><X size={16} /></button>
+          <button className="ghost icon" onClick={resetChat} title={t('chat.clearTitle')} aria-label={t('chat.clearLabel')}><X size={16} /></button>
         )}
       </div>
 
@@ -130,22 +131,22 @@ export function ChatPanel() {
         {empty && !root && !advisorReady && (
           <div className="chat-hero">
             <MessageSquare size={32} />
-            <h3>Pinkbin AI</h3>
-            <p>AI 还没配置 — 点右上角 <strong>⚙️ 设置</strong> 填一个 API Key 和模型名，或接本地 Ollama（不用 Key）。</p>
+            <h3>{t('chat.title')}</h3>
+            <p dangerouslySetInnerHTML={{ __html: t('chat.noConfig', { strong: '<strong>', '/strong': '</strong>' }) }} />
           </div>
         )}
         {empty && !root && advisorReady && (
           <div className="chat-hero">
             <MessageSquare size={32} />
-            <h3>Pinkbin AI</h3>
-            <p>选一个磁盘 → 点扫描 → AI 自动给整体解析。<br />扫完之后，可以把左边的任意文件 / 文件夹拖进来问。</p>
-            {!isTauri && <p className="muted">浏览器预览模式：扫描数据是模拟的，但 AI 会走真实接口。</p>}
+            <h3>{t('chat.title')}</h3>
+            <p>{t('chat.hint')}</p>
+            {!isTauri && <p className="muted">{t('chat.browserHint')}</p>}
           </div>
         )}
         {empty && root && advisorReady && (
           <div className="chat-hero">
             <Sparkles size={28} />
-            <p>AI 正在生成整体解析…</p>
+            <p>{t('chat.generating')}</p>
           </div>
         )}
         {chatTurns.map((t) => (
@@ -153,21 +154,21 @@ export function ChatPanel() {
             key={t.id}
             text={t.text}
             role={t.role}
-            pending={t.pending}
-            advice={t.advice}
+            pending={t.pending ?? false}
+            advice={t.advice ?? null}
             node={node}
             recycleNode={recycleNode}
           />
         ))}
-        {chatBusy && <div className="chat-typing">AI 正在打字…</div>}
+        {chatBusy && <div className="chat-typing">{t('chat.typing')}</div>}
         {showScrollBtn && (
           <button
             className="chat-scroll-btn"
             onClick={() => scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: 'smooth' })}
-            title="滚动到底部"
-            aria-label="滚动到底部"
+            title={t('chat.scrollTitle')}
+            aria-label={t('chat.scrollLabel')}
           >
-            ↓ 新消息
+            {t('chat.scrollBottom')}
           </button>
         )}
       </div>
@@ -179,7 +180,7 @@ export function ChatPanel() {
               <span key={d.path} className="chat-pill" title={d.path}>
                 {d.path.endsWith(d.name) && d.path !== d.name ? <Folder size={11} /> : <File size={11} />}
                 {d.name}
-                <button onClick={() => setPendingDrops((prev) => prev.filter((p) => p.path !== d.path))} aria-label={`移除 ${d.name}`}><X size={11} /></button>
+                <button onClick={() => setPendingDrops((prev) => prev.filter((p) => p.path !== d.path))} aria-label={t('chat.removeLabel', { name: d.name })}><X size={11} /></button>
               </span>
             ))}
           </div>
@@ -192,7 +193,7 @@ export function ChatPanel() {
                 <button
                   type="button"
                   onClick={() => setPendingImages((prev) => prev.filter((p) => p.id !== img.id))}
-                  aria-label={`移除图片 ${img.name}`}
+                  aria-label={t('chat.removeImageLabel', { name: img.name })}
                 ><X size={11} /></button>
               </span>
             ))}
@@ -215,15 +216,15 @@ export function ChatPanel() {
             type="button"
             className="ghost icon chat-attach"
             onClick={() => fileInputRef.current?.click()}
-            title="加图片（也可以粘贴/拖进来）"
-            aria-label="添加图片"
+            title={t('chat.attachTitle')}
+            aria-label={t('chat.attachLabel')}
             disabled={chatBusy}
           >
             <ImagePlus size={15} />
           </button>
           <textarea
             rows={2}
-            placeholder={root ? '问 AI：这是什么？能删吗？把文件 / 图片拖进来…（图片粘贴也行）' : advisorReady ? '先选一个磁盘开始扫描，或贴张图片直接问' : '先去右上角 ⚙️ 设置配 AI'}
+            placeholder={root ? t('chat.placeholder.scan') : advisorReady ? t('chat.placeholder.ready') : t('chat.placeholder.config')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
@@ -238,7 +239,7 @@ export function ChatPanel() {
           <button
             className="primary"
             onClick={() => askFollowUp(input, pendingDrops, pendingImages)}
-            title={advisorReady ? undefined : '先去设置里配 AI'}
+            title={advisorReady ? undefined : t('chat.dropHint')}
             disabled={
               (!input.trim() && pendingDrops.length === 0 && pendingImages.length === 0) ||
               chatBusy ||
@@ -246,7 +247,7 @@ export function ChatPanel() {
               !advisorReady
             }
           >
-            <Send size={14} /> 发送
+            <Send size={14} /> {t('chat.send')}
           </button>
         </div>
       </div>
@@ -282,7 +283,7 @@ const TurnBubble = memo(function TurnBubble({
       {role === 'assistant' && advice?.action === 'recycle' && !advice?.needs_inspection && !advice?.is_fallback && node && (
         <div className="chat-actions">
           <button className="primary" onClick={() => recycleNode(node, advice?.reasoning ?? 'AI suggested')}>
-            <Trash2 size={13} /> 回收 {formatBytes(node.size)}
+            <Trash2 size={13} /> {t('chat.recycle', { size: formatBytes(node.size) })}
           </button>
         </div>
       )}
@@ -300,7 +301,7 @@ function AdviceCard({ advice }: { advice: AdvisorResponse }) {
     return (
       <div className="advice-pill advice-fallback" role="alert" aria-live="polite">
         <ShieldX size={14} style={{ color: 'var(--risk-high)' }} />
-        <strong>演示数据 / 不可信</strong>
+        <strong>{t('chat.fallback')}</strong>
         <span className="muted">{advice.what}</span>
       </div>
     );
@@ -312,8 +313,8 @@ function AdviceCard({ advice }: { advice: AdvisorResponse }) {
       <Icon size={14} style={{ color }} />
       <strong>{advice.category}</strong>
       <span className="badge">{advice.action}</span>
-      <span className="muted">风险 {advice.risk}</span>
-      {advice.needs_inspection && <span className="badge">需要再看看</span>}
+      <span className="muted">{t('chat.risk', { risk: advice.risk })}</span>
+      {advice.needs_inspection && <span className="badge">{t('chat.needsInspect')}</span>}
       {advice.suggested_scaffold && (
         <button className="ghost advice-scaffold-link" onClick={() => requestStudio(advice.suggested_scaffold!)} title="在 Studio 中查看">
           {advice.suggested_scaffold}

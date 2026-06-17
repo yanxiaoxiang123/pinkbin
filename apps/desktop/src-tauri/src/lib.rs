@@ -489,7 +489,7 @@ fn resolve_scope_paths(
 async fn scope_sizes(
     state: State<'_, AppState>,
     scaffold_id: String,
-    root_path: String,
+    root_paths: Vec<String>,
     scope_days: Option<HashMap<String, u32>>,
     wxid_filter: Option<Vec<String>>,
     env_filter: Option<Vec<String>>,
@@ -522,7 +522,6 @@ async fn scope_sizes(
         });
     }
 
-    let root = PathBuf::from(&root_path);
     let wxid_filter_owned = wxid_filter;
     let env_filter_owned = env_filter;
     let scope_days_owned = scope_days;
@@ -541,20 +540,19 @@ async fn scope_sizes(
             .map(|(i, _)| i)
             .collect();
 
-        // ── File scopes: single walk, tally per-file across all file scopes.
-        // Track BOTH "eligible at the requested retention" (`tally`) and
-        // "total in scope ignoring retention" (`total`) — UI uses the gap to
-        // explain "X GB total · 0 GB older than 90d will be cleaned" instead
-        // of the previous misleading "空".
         let mut tally: Vec<(u64, u64)> = vec![(0, 0); builds.len()];
         let mut total: Vec<(u64, u64)> = vec![(0, 0); builds.len()];
+
+        for root_path in &root_paths {
+            let root = PathBuf::from(root_path);
+
+        // ── File scopes: single walk per root, tally across all file scopes.
         if !file_indices.is_empty() {
             for entry in pinkbin_walker(&root).into_iter().flatten() {
                 if !entry.file_type().is_file() {
                     continue;
                 }
                 let path = entry.path();
-                // Hoist lightweight filter checks before the metadata syscall.
                 if !path_passes_wxid(&path, wxid_filter_owned.as_deref())
                     || !path_passes_env(&path, env_filter_owned.as_deref())
                 {
@@ -588,7 +586,6 @@ async fn scope_sizes(
         // ── Directory scopes: each gets its own dir walk + size sum.
         for &i in &dir_indices {
             let b = &builds[i];
-            // Total: dirs matching the glob ignoring retention.
             let total_dirs = find_matching_dirs(
                 &root,
                 &b.set,
@@ -600,7 +597,8 @@ async fn scope_sizes(
             for d in &total_dirs {
                 t_bytes = t_bytes.saturating_add(dir_size_excluding(d, &[]));
             }
-            total[i] = (t_bytes, total_dirs.len() as u64);
+            total[i].0 = total[i].0.saturating_add(t_bytes);
+            total[i].1 = total[i].1.saturating_add(total_dirs.len() as u64);
             // Eligible: same but with retention applied.
             let days = scope_days_owned
                 .as_ref()
@@ -618,8 +616,10 @@ async fn scope_sizes(
                 bytes = bytes.saturating_add(dir_size_excluding(d, &[]));
                 count = count.saturating_add(1);
             }
-            tally[i] = (bytes, count);
+            tally[i].0 = tally[i].0.saturating_add(bytes);
+            tally[i].1 = tally[i].1.saturating_add(count);
         }
+        } // end for root_path
 
         // Build output preserving builds order.
         for (i, b) in builds.into_iter().enumerate() {
