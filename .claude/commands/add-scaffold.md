@@ -2,6 +2,45 @@
 description: 按 14-phase 工作流为指定 app 编写清理 scaffold（含需求采集、实测勘测、TOML、safety test、UI 集成）
 ---
 
+## First time? Read this first
+
+> **如果你是第一次使用 `/add-scaffold`，花 3 分钟读完这段再开始。**
+
+### 这个命令做什么？
+
+它为一个常用软件（如微信、Chrome、Steam）编写一份**清理 scaffold**——一个 TOML 文件 + 一个 Rust safety test，告诉 Pinkbin "这个软件的缓存在哪、哪些能删、哪些绝对不能碰"。
+
+### 你会经历什么？
+
+1. **访谈**（~5 min）：Claude 会问你这个软件的数据存在哪、哪些是缓存、哪些是用户数据
+2. **实测**（~10 min）：Claude 会在你机器上用 Glob 枚举真实目录树，验证假设
+3. **写 TOML + safety test**（~5 min）：自动生成，你 review
+4. **UI 验证**：`pnpm tauri dev` 看卡片是否正常渲染
+
+### 开始前你需要
+
+- **这个软件已安装在你机器上**（实测需要真实目录）
+- 知道它的数据根在哪（例如微信在 `%APPDATA%/Tencent/WeChat`）
+- 读过 `CLAUDE.md` 的 Hard rules（特别是"scope glob 红线"一节）
+
+### 关键纪律
+
+- **绝不跳步**：每个 phase 都是上一次踩坑的产物
+- **先实测再写 TOML**：勘测往往推翻 Phase 1-2 的假设
+- **safety test 必须包含红线断言**：没有 test 的 scaffold 不会 merge
+- **改了 schema 要同步 types.ts**：`cargo check` + `tsc --noEmit` 都干净才算完
+
+### 常见陷阱
+
+| 陷阱 | 后果 | 避免方法 |
+|------|------|----------|
+| 按"想象中的路径"写 glob | 命中用户数据 | Phase 5-7 必须实测 |
+| 漏掉红线 | 删了聊天记录 | safety test 红线断言 |
+| TOML 改了 schema 没同步 types.ts | 前端编译报错 | Phase 11 检查 |
+| `window.confirm` 做确认 | Tauri webview 行为不稳定 | 用两步确认 + dry-run |
+
+---
+
 为 app `$ARGUMENTS` 编写或重写一份 scaffold TOML。**严格按以下 phase 顺序执行，每个 phase 完成后向用户报告进展并在必要时确认**。绝不跳步——每一步都是上一次踩坑的产物（详见 `CLAUDE.md`）。
 
 ---

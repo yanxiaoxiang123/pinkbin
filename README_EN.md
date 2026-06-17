@@ -143,6 +143,8 @@ The most valuable contribution is **writing a new cleanup scaffold**. Each app i
 
 Full workflow: [`.claude/commands/add-scaffold.md`](.claude/commands/add-scaffold.md).
 
+**EN docs PRs welcome** — the codebase is bilingual (Chinese prose + English code/terminology). If you spot a missing English translation or want to help translate `docs/` into English, PRs are always appreciated. Same goes for typo fixes, clearer wording, or better examples.
+
 ### Development
 
 ```bash

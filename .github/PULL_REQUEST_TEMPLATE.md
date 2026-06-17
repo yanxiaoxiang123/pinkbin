@@ -29,3 +29,4 @@
 
 - [ ] `cargo test --workspace`
 - [ ] `pnpm tauri dev` smoke-tested locally
+- [ ] **UI verification**: attach screenshot(s) showing the feature / fix in the running app

@@ -15,13 +15,15 @@
 
 | Scaffold | Req doc | TOML | Safety test | UI 验证 | 备注 |
 |---|:---:|:---:|:---:|:---:|---|
-| wechat-pc | ✅ | ✅ | ✅ | ⏳ | 4.x 主线 13 scope + 3.x legacy 9 scope |
+| wechat-pc | ✅ | ✅ | ✅ | ✅ | 4.x 主线 13 scope + 3.x legacy 9 scope |
 
 ## Dev tools
 
+类别需求文档：[dev-tools.md](dev-tools.md)
+
 | Scaffold | Req doc | TOML | Safety test | UI 验证 | 备注 |
 |---|:---:|:---:|:---:|:---:|---|
-| conda | ⏳ | ✅ | ✅ | ⏳ | env 卡片专用 UI；整目录 recycle |
+| conda | ✅ | ✅ | ✅ | ✅ | env 卡片专用 UI；整目录 recycle |
 
 ---
 
